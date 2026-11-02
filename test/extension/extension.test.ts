@@ -1396,6 +1396,31 @@ test("formatAccountRows keeps countdowns wide, drops them narrow, and folds quie
   assert.ok(folded.join(" ").includes("+1 more"), folded.join(" | "));
 });
 
+test("the current-account marker keeps the segment color in a themed paint", () => {
+  const themed: Paint = {
+    bold: (text) => text,
+    fg: (color, text) => `<${color}>${text}</>`,
+  };
+
+  const out = formatAccountRows(
+    [{ current: true, kind: "out", name: "claude", until: NOW + 3_600_000 }],
+    themed,
+    120,
+    NOW
+  );
+
+  assert.equal(out[0], "<accent>▸</><error>claude ⏸ 10:00</>");
+
+  const unknown = formatAccountRows(
+    [{ current: true, kind: "unknown", name: "muse" }],
+    themed,
+    120,
+    NOW
+  );
+
+  assert.equal(unknown[0], "<accent>▸</><dim>muse n/a</>");
+});
+
 test("row 1 drops the provider prefix before truncating the model name", () => {
   const right = "(cliproxyapi) gpt-6.1-sol • medium";
   const bare = "gpt-6.1-sol • medium";

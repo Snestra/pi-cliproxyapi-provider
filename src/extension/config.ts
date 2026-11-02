@@ -244,7 +244,7 @@ export const resolveExtensionConnection = (
 /** Whether pi's automatic compaction is on in settings.json. Defaults to true, as pi does. */
 export const loadAutoCompactEnabled = (agentDir: string): boolean => {
   try {
-    const settings = readJsonFile(
+    const settings = readJsonMemo(
       path.join(agentDir, "settings.json"),
       SettingsFileSchema
     );

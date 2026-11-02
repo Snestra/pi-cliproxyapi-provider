@@ -176,6 +176,7 @@ interface UsageTotals {
 }
 
 interface StatsCache {
+  contextUsage: ReturnType<ExtensionContext["getContextUsage"]>;
   entryCount: number;
   latestCacheHitRate?: number;
   leafId: string | null;
@@ -415,6 +416,7 @@ export class FooterController {
     }
 
     const next: StatsCache = {
+      contextUsage: ctx.getContextUsage(),
       entryCount: entries.length,
       leafId,
       model: ctx.model,
@@ -492,7 +494,11 @@ export class FooterController {
     right: string,
     rightWithoutProvider: string,
     paint: Paint,
-    width: number
+    width: number,
+    shrinkRight: (text: string, available: number) => string = (
+      text,
+      available
+    ) => truncateToWidth(text, available, "")
   ): string {
     return FooterController.assembleRow1Parts(
       cwdPart,
@@ -501,7 +507,8 @@ export class FooterController {
       right,
       rightWithoutProvider,
       paint,
-      width
+      width,
+      shrinkRight
     );
   }
 
@@ -512,7 +519,8 @@ export class FooterController {
     right: string,
     rightWithoutProvider: string,
     paint: Paint,
-    width: number
+    width: number,
+    shrinkRight: (text: string, available: number) => string
   ): string {
     let cwd = cwdPart;
 
@@ -562,9 +570,7 @@ export class FooterController {
     if (!fitsWithoutProvider()) {
       const available = width - visibleWidth(left) - 2;
       rightPart =
-        available > 0
-          ? truncateToWidth(rightWithoutProvider, available, "")
-          : "";
+        available > 0 ? shrinkRight(rightWithoutProvider, available) : "";
     }
 
     const leftWidth = visibleWidth(left);
@@ -604,7 +610,7 @@ export class FooterController {
       paint
     );
 
-    const contextUsage = ctx.getContextUsage();
+    const { contextUsage } = stats;
 
     const contextPart = contextSegment(
       contextUsage?.percent ?? null,
@@ -634,7 +640,9 @@ export class FooterController {
       this.modelPart(ctx, paint, footerData),
       this.modelPart(ctx, paint, footerData, false),
       paint,
-      width
+      width,
+      (text, available) =>
+        this.modelPart(ctx, paint, footerData, false, available)
     );
 
     const statuses = footerData.getExtensionStatuses();
@@ -675,7 +683,8 @@ export class FooterController {
     ctx: ExtensionContext,
     paint: Paint,
     footerData: ReadonlyFooterDataProvider,
-    includeProvider = true
+    includeProvider = true,
+    maxBaseWidth?: number
   ): string {
     const { theme } = ctx.ui;
     const { model } = ctx;
@@ -685,6 +694,11 @@ export class FooterController {
     if (model?.reasoning) {
       const level = ctx.thinkingLevel ?? "off";
       base += level === "off" ? " • thinking off" : ` • ${level}`;
+    }
+
+    // Keep fast and paused when the model name must shrink; they change what the next request does.
+    if (maxBaseWidth !== undefined) {
+      base = truncateToWidth(base, maxBaseWidth, "");
     }
 
     let right =

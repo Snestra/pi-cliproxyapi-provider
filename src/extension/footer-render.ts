@@ -115,14 +115,17 @@ const renderSegment = (
   }
 
   const marker = segment.current ? paint.fg("accent", "▸") : "";
-  const name = `${marker}${segment.name}`;
 
+  // The marker's own color reset would clear the segment's color, so it stays outside the painted text.
   if (segment.kind === "out") {
-    return paint.fg("error", `${name} ⏸ ${outUntil(segment.until, now)}`);
+    return (
+      marker +
+      paint.fg("error", `${segment.name} ⏸ ${outUntil(segment.until, now)}`)
+    );
   }
 
   if (segment.kind === "unknown") {
-    return paint.fg("dim", `${name} n/a`);
+    return marker + paint.fg("dim", `${segment.name} n/a`);
   }
 
   const windows = segment.windows.map((window) => {
@@ -136,7 +139,7 @@ const renderSegment = (
     return `${paint.fg("dim", window.label)} ${bar(window.usedPercent, options.cells, paint)} ${percentText(window.usedPercent, paint)}${resetText}`;
   });
 
-  return `${name} ${windows.join(" ")}`;
+  return `${marker}${segment.name} ${windows.join(" ")}`;
 };
 
 const renderPlainSegment = (
@@ -219,7 +222,11 @@ const wrapSegments = (
     const partWidth = visibleWidth(part);
 
     if (partWidth > width) {
-      return undefined;
+      const truncated = truncateToWidth(part, width, paint.fg("dim", "..."));
+      rows.push(truncated);
+      row = "";
+      rowWidth = 0;
+      continue;
     }
 
     if (!row) {
