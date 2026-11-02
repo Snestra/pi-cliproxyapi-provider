@@ -1,6 +1,6 @@
 {
   "name": "@juvio15/pi-cliproxyapi-provider",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "pi provider for CLIProxyAPI: per-family APIs, model catalog, costs, web search, usage footer",
   "keywords": [
     "cliproxyapi",
