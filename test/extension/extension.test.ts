@@ -40,6 +40,7 @@ import {
   severity,
 } from "../../src/extension/footer-render.ts";
 import type { Paint, UsageSegment } from "../../src/extension/footer-render.ts";
+import { FooterController } from "../../src/extension/footer.ts";
 import { PriceCache } from "../../src/extension/prices.ts";
 import { createExtensionProvider } from "../../src/extension/provider.ts";
 import { formatStatus } from "../../src/extension/status.ts";
@@ -1374,6 +1375,45 @@ test("formatAccountRows keeps countdowns wide, drops them narrow, and folds quie
   assert.deepEqual(formatAccountRows([], identityPaint, 80, NOW, "⏱ 1m 4s"), [
     "⏱ 1m 4s",
   ]);
+
+  const currentUnknown: UsageSegment[] = [
+    { current: true, kind: "unknown", name: "muse" },
+    {
+      current: false,
+      kind: "windows",
+      name: "claude",
+      windows: [
+        { label: "5h", usedPercent: 12 },
+        { label: "7d", usedPercent: 48 },
+      ],
+    },
+  ];
+
+  const folded = formatAccountRows(currentUnknown, identityPaint, 40, NOW);
+
+  assert.ok(folded.join(" ").includes("▸muse"), folded.join(" | "));
+  assert.ok(!folded.join(" ").includes("claude"), folded.join(" | "));
+  assert.ok(folded.join(" ").includes("+1 more"), folded.join(" | "));
+});
+
+test("row 1 drops the provider prefix before truncating the model name", () => {
+  const right = "(cliproxyapi) gpt-6.1-sol • medium";
+  const bare = "gpt-6.1-sol • medium";
+  const context = contextSegment(0, 500_000, true, identityPaint);
+
+  const row = FooterController.assembleRow1(
+    "~/proj",
+    [],
+    context,
+    right,
+    bare,
+    identityPaint,
+    50
+  );
+
+  assert.ok(!row.includes("cliproxyapi"), row);
+  assert.ok(row.includes("gpt-6.1-sol"), row);
+  assert.ok(visibleWidth(row) <= 50, row);
 });
 
 test("row 1 helpers format tokens, cwd, and the context bar", () => {

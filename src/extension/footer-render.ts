@@ -318,7 +318,9 @@ export const formatAccountRows = (
     return kept;
   };
 
-  const noUnknown = renderFolded((segment) => segment.kind !== "unknown");
+  const noUnknown = renderFolded(
+    (segment) => segment.kind !== "unknown" || segment.current
+  );
 
   if (fitsOneRow(noUnknown, paint, width)) {
     return [joinRow(noUnknown, paint)];

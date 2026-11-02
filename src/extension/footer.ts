@@ -484,11 +484,33 @@ export class FooterController {
     return parts;
   }
 
-  private static assembleRow1(
+  /** Exported for the narrow-width row 1 test. */
+  static assembleRow1(
     cwdPart: string,
     statParts: StatPart[],
     contextPart: string,
     right: string,
+    rightWithoutProvider: string,
+    paint: Paint,
+    width: number
+  ): string {
+    return FooterController.assembleRow1Parts(
+      cwdPart,
+      statParts,
+      contextPart,
+      right,
+      rightWithoutProvider,
+      paint,
+      width
+    );
+  }
+
+  private static assembleRow1Parts(
+    cwdPart: string,
+    statParts: StatPart[],
+    contextPart: string,
+    right: string,
+    rightWithoutProvider: string,
     paint: Paint,
     width: number
   ): string {
@@ -527,11 +549,22 @@ export class FooterController {
       left = buildLeft();
     }
 
+    // Pi drops the provider prefix before it truncates the model name.
     let rightPart = right;
 
     if (!fits()) {
+      rightPart = rightWithoutProvider;
+    }
+
+    const fitsWithoutProvider = (): boolean =>
+      visibleWidth(left) + 2 + visibleWidth(rightPart) <= width;
+
+    if (!fitsWithoutProvider()) {
       const available = width - visibleWidth(left) - 2;
-      rightPart = available > 0 ? truncateToWidth(right, available, "") : "";
+      rightPart =
+        available > 0
+          ? truncateToWidth(rightWithoutProvider, available, "")
+          : "";
     }
 
     const leftWidth = visibleWidth(left);
@@ -599,6 +632,7 @@ export class FooterController {
       statParts,
       contextPart,
       this.modelPart(ctx, paint, footerData),
+      this.modelPart(ctx, paint, footerData, false),
       paint,
       width
     );
@@ -640,7 +674,8 @@ export class FooterController {
   private modelPart(
     ctx: ExtensionContext,
     paint: Paint,
-    footerData: ReadonlyFooterDataProvider
+    footerData: ReadonlyFooterDataProvider,
+    includeProvider = true
   ): string {
     const { theme } = ctx.ui;
     const { model } = ctx;
@@ -653,7 +688,7 @@ export class FooterController {
     }
 
     let right =
-      footerData.getAvailableProviderCount() > 1 && model
+      includeProvider && footerData.getAvailableProviderCount() > 1 && model
         ? paint.fg("dim", `(${model.provider}) `)
         : "";
 
