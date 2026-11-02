@@ -113,7 +113,7 @@ export const registerTpsFooter = (
     if (primaryUi(ctx)) {
       ctx.ui.setStatus(
         STATUS_KEY,
-        ctx.ui.theme.fg("dim", `Elapsed ${formatElapsed(elapsed() / 1000)}`)
+        ctx.ui.theme.fg("dim", `⏱ ${formatElapsed(elapsed() / 1000)}`)
       );
     }
   };

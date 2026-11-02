@@ -8,6 +8,7 @@ import { setTimeout } from "node:timers/promises";
 
 import type { StreamOptions } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { format } from "oxfmt";
 
 import {
@@ -27,6 +28,19 @@ import {
   FastModeController,
   toggleFastMode,
 } from "../../src/extension/fast.ts";
+import {
+  bar,
+  contextSegment,
+  countdown,
+  formatAccountRows,
+  formatCwd,
+  formatStatusLine,
+  formatTokens,
+  outUntil,
+  severity,
+} from "../../src/extension/footer-render.ts";
+import type { Paint, UsageSegment } from "../../src/extension/footer-render.ts";
+import { FooterController } from "../../src/extension/footer.ts";
 import { PriceCache } from "../../src/extension/prices.ts";
 import { createExtensionProvider } from "../../src/extension/provider.ts";
 import { formatStatus } from "../../src/extension/status.ts";
@@ -1007,6 +1021,7 @@ test("formatStatus shows the whole state in the agreed seven lines", () => {
     catalogAgeMs: 4 * 60_000 + 20_000,
     fast: true,
     fastModels: 8,
+    footer: true,
     keySource: "login",
     management: { source: "env", usageAgeMs: 75_000 },
     models: 17,
@@ -1023,7 +1038,7 @@ test("formatStatus shows the whole state in the agreed seven lines", () => {
       "CLIProxyAPI  http://127.0.0.1:8317  key from auth.json (/login)",
       "Models       17 (1 stale), catalog 4 min old",
       "Prices       models.dev, 3 h old (etag 94aeb98e)",
-      "Fast         on (8 models support it)    Paused  no",
+      "Fast         on (8 models support it)    Paused  no    Footer  custom",
       "Management   key set (env CLIPROXY_MANAGEMENT_KEY), usage 1 min old",
       "Web search   auto (gpt-6-luna)",
       "Thinking     summarized: claude-opus-5-5",
@@ -1036,6 +1051,7 @@ test("formatStatus without an API key or management key says so", () => {
     baseUrl: "http://127.0.0.1:8317",
     fast: false,
     fastModels: 0,
+    footer: false,
     models: 0,
     paused: true,
     searchModel: {},
@@ -1049,7 +1065,7 @@ test("formatStatus without an API key or management key says so", () => {
       "CLIProxyAPI  http://127.0.0.1:8317  not configured",
       "Models       0, catalog not fetched",
       "Prices       not loaded",
-      "Fast         off (0 models support it)    Paused  yes",
+      "Fast         off (0 models support it)    Paused  yes    Footer  pi stock",
       "Management   not set",
       "Web search   auto (none available)",
       "Thinking     omitted for all models",
@@ -1081,6 +1097,7 @@ test("the status never shows the API key or the management key", async () => {
     baseUrl: "http://127.0.0.1:8317",
     fast: false,
     fastModels: 0,
+    footer: true,
     keySource: resolveConnectionSources(envOptions.env, config, stored).apiKey,
     management: new UsageTracker(envOptions).managementStatus(),
     models: 0,
@@ -1094,6 +1111,7 @@ test("the status never shows the API key or the management key", async () => {
     baseUrl: "http://127.0.0.1:8317",
     fast: false,
     fastModels: 0,
+    footer: true,
     keySource: resolveConnectionSources({}, config, stored).apiKey,
     management: new UsageTracker({
       agentDir: agentDir.pathname,
@@ -1158,5 +1176,285 @@ test("formatTpsSummary without any input shows no cache hit rate", () => {
       40_100
     ),
     "TPS 0.0 tok/s (12.3s generating of 40.1s). out 0, in 0, cache hit -- (r/w 0/0), total 0"
+  );
+});
+
+const identityPaint: Paint = {
+  bold: (text) => text,
+  fg: (_color, text) => text,
+};
+
+const NOW = 1_800_000_000_000;
+
+const mixedSegments: UsageSegment[] = [
+  {
+    current: true,
+    kind: "windows",
+    name: "claude",
+    windows: [
+      { label: "5h", resetAt: NOW + 2 * 3_600_000, usedPercent: 12 },
+      { label: "7d", usedPercent: 48 },
+    ],
+  },
+  { current: false, kind: "out", name: "devin", until: NOW + 2 * 3_600_000 },
+  { current: false, kind: "unknown", name: "muse" },
+];
+
+test("segments covers windows, out with the earliest return, unknown, skipped, and model-out accounts", async () => {
+  const agentDir = await usageAgentDir("segments-agent");
+  await writeFile(
+    new URL("cliproxyapi-usage.json", agentDir),
+    `${JSON.stringify({
+      exhausted: {
+        "devin-2": NOW + 5 * 3_600_000,
+        "orphan-model": NOW + 3 * 3_600_000,
+      },
+      providers: [
+        {
+          models: ["claude-haiku-5-5"],
+          name: "claude",
+          provider: "claude",
+          windows: [
+            { label: "5h", resetAt: NOW + 2 * 3_600_000, usedPercent: 12 },
+            { label: "7d", usedPercent: 48 },
+          ],
+        },
+        {
+          exhaustedUntil: NOW + 2 * 3_600_000,
+          models: ["devin-1", "devin-2"],
+          name: "devin",
+          provider: "devin",
+          windows: [{ label: "5h", usedPercent: 100 }],
+        },
+        { models: ["muse-1"], name: "muse", provider: "muse", windows: [] },
+        {
+          models: ["not-in-catalog"],
+          name: "other",
+          provider: "other",
+          windows: [{ label: "5h", usedPercent: 3 }],
+        },
+      ],
+    })}\n`
+  );
+
+  const tracker = new UsageTracker({
+    agentDir: agentDir.pathname,
+    env: {},
+    providerId: "cliproxyapi",
+  });
+
+  const segments = tracker.segments(
+    ["claude-haiku-5-5", "devin-1", "devin-2", "muse-1", "orphan-model"],
+    "claude-haiku-5-5",
+    NOW
+  );
+
+  assert.deepEqual(segments, [
+    {
+      current: true,
+      kind: "windows",
+      name: "claude",
+      windows: [
+        { label: "5h", resetAt: NOW + 2 * 3_600_000, usedPercent: 12 },
+        { label: "7d", usedPercent: 48 },
+      ],
+    },
+    { current: false, kind: "out", name: "devin", until: NOW + 2 * 3_600_000 },
+    { current: false, kind: "unknown", name: "muse" },
+    { kind: "model-out", modelId: "orphan-model", until: NOW + 3 * 3_600_000 },
+  ]);
+});
+
+test("bar fills by eighths and clamps over 100", () => {
+  assert.equal(bar(0, 5, identityPaint), "░░░░░");
+  assert.equal(bar(12, 5, identityPaint), "▋░░░░");
+  assert.equal(bar(48, 5, identityPaint), "██▍░░");
+  assert.equal(bar(84, 5, identityPaint), "████▎");
+  assert.equal(bar(100, 5, identityPaint), "█████");
+  assert.equal(bar(150, 5, identityPaint), "█████");
+});
+
+test("severity and bar colors follow the 75 and 90 thresholds", () => {
+  assert.equal(severity(74), undefined);
+  assert.equal(severity(75), "warning");
+  assert.equal(severity(90), "error");
+
+  const colors: string[] = [];
+
+  const recording: Paint = {
+    bold: (text) => text,
+    fg: (color, text) => {
+      colors.push(color);
+
+      return text;
+    },
+  };
+
+  bar(12, 5, recording);
+  assert.ok(colors.includes("syntaxKeyword"));
+  colors.length = 0;
+  bar(84, 5, recording);
+  assert.ok(colors.includes("warning"));
+  colors.length = 0;
+  bar(95, 5, recording);
+  assert.ok(colors.includes("error"));
+});
+
+test("countdown uses the coarsest unit and is empty once the reset has passed", () => {
+  assert.equal(countdown(NOW + 22 * 60_000, NOW), "↺22m");
+  assert.equal(countdown(NOW + 3 * 3_600_000 + 12 * 60_000, NOW), "↺3h");
+  assert.equal(countdown(NOW + 4 * DAY_MS, NOW), "↺4d");
+  assert.equal(countdown(NOW - 1, NOW), "");
+  assert.equal(countdown(NOW, NOW), "");
+});
+
+test("outUntil shows a clock time, then a weekday past 20 hours", () => {
+  assert.match(outUntil(NOW + 2 * 3_600_000, NOW), /^\d{2}:\d{2}$/u);
+  assert.match(outUntil(NOW + 2 * DAY_MS, NOW), /^\w{3} \d{2}:\d{2}$/u);
+});
+
+test("formatStatusLine renders the mixed segments on one line", () => {
+  const line = formatStatusLine(mixedSegments, identityPaint, NOW);
+
+  assert.ok(line);
+  assert.ok(line.startsWith("claude 5h ▋░░░░  12% 7d ██▍░░  48% · "), line);
+  assert.ok(line.includes("devin ⏸ "), line);
+  assert.ok(line.endsWith("muse n/a"), line);
+  assert.equal(formatStatusLine([], identityPaint, NOW), undefined);
+});
+
+test("formatAccountRows keeps countdowns wide, drops them narrow, and folds quiet accounts", () => {
+  const wide = formatAccountRows(
+    mixedSegments,
+    identityPaint,
+    200,
+    NOW,
+    "⏱ 1m 4s"
+  );
+
+  assert.ok(wide.join(" ").includes("↺2h"), wide.join(" | "));
+  assert.ok(wide.join(" ").includes("▸claude"), wide.join(" | "));
+  assert.ok(wide.join(" ").includes("⏱ 1m 4s"), wide.join(" | "));
+
+  const many: UsageSegment[] = [
+    ...mixedSegments,
+    {
+      current: false,
+      kind: "windows",
+      name: "grok",
+      windows: [{ label: "5h", resetAt: NOW + DAY_MS, usedPercent: 30 }],
+    },
+    {
+      current: false,
+      kind: "windows",
+      name: "kimi",
+      windows: [{ label: "5h", resetAt: NOW + DAY_MS, usedPercent: 20 }],
+    },
+  ];
+
+  const at80 = formatAccountRows(many, identityPaint, 80, NOW);
+
+  assert.ok(!at80.join(" ").includes("↺"), at80.join(" | "));
+
+  for (const row of at80) {
+    assert.ok(visibleWidth(row) <= 80, row);
+  }
+
+  const narrow = formatAccountRows(mixedSegments, identityPaint, 40, NOW);
+
+  for (const row of narrow) {
+    assert.ok(visibleWidth(row) <= 40, row);
+  }
+
+  assert.ok(narrow.join(" ").includes("▸claude"), narrow.join(" | "));
+  assert.ok(narrow.join(" ").includes("devin ⏸"), narrow.join(" | "));
+  assert.ok(narrow.join(" ").includes("+1 more"), narrow.join(" | "));
+  assert.ok(!narrow.join(" ").includes("↺"), narrow.join(" | "));
+
+  assert.deepEqual(formatAccountRows([], identityPaint, 80, NOW), []);
+  assert.deepEqual(formatAccountRows([], identityPaint, 80, NOW, "⏱ 1m 4s"), [
+    "⏱ 1m 4s",
+  ]);
+
+  const currentUnknown: UsageSegment[] = [
+    { current: true, kind: "unknown", name: "muse" },
+    {
+      current: false,
+      kind: "windows",
+      name: "claude",
+      windows: [
+        { label: "5h", usedPercent: 12 },
+        { label: "7d", usedPercent: 48 },
+      ],
+    },
+  ];
+
+  const folded = formatAccountRows(currentUnknown, identityPaint, 40, NOW);
+
+  assert.ok(folded.join(" ").includes("▸muse"), folded.join(" | "));
+  assert.ok(!folded.join(" ").includes("claude"), folded.join(" | "));
+  assert.ok(folded.join(" ").includes("+1 more"), folded.join(" | "));
+});
+
+test("the current-account marker keeps the segment color in a themed paint", () => {
+  const themed: Paint = {
+    bold: (text) => text,
+    fg: (color, text) => `<${color}>${text}</>`,
+  };
+
+  const out = formatAccountRows(
+    [{ current: true, kind: "out", name: "claude", until: NOW + 3_600_000 }],
+    themed,
+    120,
+    NOW
+  );
+
+  assert.equal(out[0], "<accent>▸</><error>claude ⏸ 10:00</>");
+
+  const unknown = formatAccountRows(
+    [{ current: true, kind: "unknown", name: "muse" }],
+    themed,
+    120,
+    NOW
+  );
+
+  assert.equal(unknown[0], "<accent>▸</><dim>muse n/a</>");
+});
+
+test("row 1 drops the provider prefix before truncating the model name", () => {
+  const right = "(cliproxyapi) gpt-6.1-sol • medium";
+  const bare = "gpt-6.1-sol • medium";
+  const context = contextSegment(0, 500_000, true, identityPaint);
+
+  const row = FooterController.assembleRow1(
+    "~/proj",
+    [],
+    context,
+    right,
+    bare,
+    identityPaint,
+    50
+  );
+
+  assert.ok(!row.includes("cliproxyapi"), row);
+  assert.ok(row.includes("gpt-6.1-sol"), row);
+  assert.ok(visibleWidth(row) <= 50, row);
+});
+
+test("row 1 helpers format tokens, cwd, and the context bar", () => {
+  assert.equal(formatTokens(999), "999");
+  assert.equal(formatTokens(1500), "1.5k");
+  assert.equal(formatTokens(999_499), "999k");
+  assert.equal(formatTokens(1_500_000), "1.5M");
+  assert.equal(formatCwd("/home/tester/work", "/home/tester"), "~/work");
+  assert.equal(formatCwd("/home/tester", "/home/tester"), "~");
+  assert.equal(formatCwd("/other/work", "/home/tester"), "/other/work");
+  assert.equal(
+    contextSegment(42, 200_000, false, identityPaint),
+    "ctx ████▎░░░░░ 42.0%/200k"
+  );
+  assert.equal(
+    contextSegment(null, 200_000, true, identityPaint),
+    "ctx ░░░░░░░░░░ ?/200k (auto)"
   );
 });

@@ -17,6 +17,9 @@ import {
 import type { ProviderUsage } from "../core/index.ts";
 import { loadCliproxyConfig, resolveExtensionConnection } from "./config.ts";
 import { readJsonMemo, writeJsonAtomic } from "./files.ts";
+import type { UsageSegment } from "./footer-render.ts";
+import { formatStatusLine, outUntil } from "./footer-render.ts";
+import { themePaint } from "./footer.ts";
 
 /** Shared by every pi process, so a quota error in one agent hides the model in all of them. */
 export const USAGE_FILE_NAME = "cliproxyapi-usage.json";
@@ -25,7 +28,6 @@ export const MANAGEMENT_KEY_ENV = "CLIPROXY_MANAGEMENT_KEY";
 /** How old the shared usage snapshot may get before a session fetches a new one. */
 const USAGE_TTL_MS = 2 * 60_000;
 const STATUS_KEY = "cliproxyapi-usage";
-const SAME_DAY_MS = 20 * 60 * 60_000;
 
 const UsageWindowSchema = Type.Object({
   label: Type.String(),
@@ -69,20 +71,6 @@ export interface UsageTrackerOptions {
   env?: Readonly<Record<string, string | undefined>>;
   fetchFn?: typeof fetch;
 }
-
-const formatTime = (time: number, now: number): string => {
-  const options: Intl.DateTimeFormatOptions =
-    time - now < SAME_DAY_MS
-      ? { hour: "2-digit", hourCycle: "h23", minute: "2-digit" }
-      : {
-          hour: "2-digit",
-          hourCycle: "h23",
-          minute: "2-digit",
-          weekday: "short",
-        };
-
-  return new Intl.DateTimeFormat(undefined, options).format(time);
-};
 
 export class UsageTracker {
   private readonly filePath: string;
@@ -459,13 +447,17 @@ export class UsageTracker {
     return Math.max(now + 1000, Math.min(stale, ...returns));
   }
 
-  /** One footer line for the accounts behind the given catalog, or undefined when nothing is known. */
-  footer(catalogIds: readonly string[], now = Date.now()): string | undefined {
+  /** The accounts behind the given catalog as footer segments, in file order. */
+  segments(
+    catalogIds: readonly string[],
+    currentModelId?: string,
+    now = Date.now()
+  ): UsageSegment[] {
     const file = this.read();
     const hidden = this.hiddenFrom(file, now);
     const catalog = new Set(catalogIds);
     const covered = new Set<string>();
-    const parts: string[] = [];
+    const segments: UsageSegment[] = [];
 
     for (const account of this.providers(file)) {
       const models = account.models.filter((model) => catalog.has(model));
@@ -478,31 +470,58 @@ export class UsageTracker {
         covered.add(model);
       }
 
+      const current =
+        currentModelId !== undefined && models.includes(currentModelId);
+
       const returns = models.map((model) => hidden.get(model));
 
       if (returns.every((time) => time !== undefined)) {
-        parts.push(
-          `${account.name} out until ${formatTime(Math.min(...returns), now)}`
-        );
+        let until = Number.POSITIVE_INFINITY;
+
+        for (const time of returns) {
+          if (time !== undefined && time < until) {
+            until = time;
+          }
+        }
+
+        segments.push({ current, kind: "out", name: account.name, until });
         continue;
       }
 
-      const windows = account.windows.map(
-        (window) => `${Math.round(window.usedPercent)}% ${window.label}`
-      );
+      if (account.windows.length === 0) {
+        segments.push({ current, kind: "unknown", name: account.name });
+        continue;
+      }
 
-      parts.push(
-        `${account.name} ${windows.length > 0 ? windows.join(", ") : "n/a"}`
-      );
+      segments.push({
+        current,
+        kind: "windows",
+        name: account.name,
+        windows: account.windows.map((window) => {
+          const mapped: Extract<
+            UsageSegment,
+            { kind: "windows" }
+          >["windows"][number] = {
+            label: window.label,
+            usedPercent: window.usedPercent,
+          };
+
+          if (window.resetAt !== undefined) {
+            mapped.resetAt = window.resetAt;
+          }
+
+          return mapped;
+        }),
+      });
     }
 
     for (const [model, until] of hidden) {
       if (catalog.has(model) && !covered.has(model)) {
-        parts.push(`${model} out until ${formatTime(until, now)}`);
+        segments.push({ kind: "model-out", modelId: model, until });
       }
     }
 
-    return parts.length > 0 ? parts.join(" │ ") : undefined;
+    return segments;
   }
 }
 
@@ -558,7 +577,7 @@ export const registerUsage = (
       notifiedModel = current.id;
       warn(
         ctx,
-        `${current.id} is out of quota until ${formatTime(until, Date.now())}. Pick another model with /model.`
+        `${current.id} is out of quota until ${outUntil(until, Date.now())}. Pick another model with /model.`
       );
     }
   };
@@ -582,7 +601,17 @@ export const registerUsage = (
       return;
     }
 
-    ctx.ui.setStatus(STATUS_KEY, tracker.footer(options.getCatalogIds()));
+    ctx.ui.setStatus(
+      STATUS_KEY,
+      formatStatusLine(
+        tracker.segments(
+          options.getCatalogIds(),
+          ctx.model?.provider === providerId ? ctx.model.id : undefined
+        ),
+        themePaint(ctx.ui.theme),
+        Date.now()
+      )
+    );
   };
 
   /** Applies the usage file to pi without a network call. */

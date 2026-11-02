@@ -17,6 +17,8 @@ export interface StatusSnapshot {
   prices?: { ageMs: number; etag?: string };
   fast: boolean;
   fastModels: number;
+  /** True when the extension owns the footer, false when pi's stock footer shows. */
+  footer: boolean;
   paused: boolean;
   /** Undefined without a management key. */
   management?: { source: ManagementKeySource; usageAgeMs?: number };
@@ -131,7 +133,7 @@ export const formatStatus = (snapshot: StatusSnapshot): string =>
     `CLIProxyAPI  ${snapshot.baseUrl}  ${snapshot.keySource ? KEY_SOURCE_LABELS[snapshot.keySource] : "not configured"}`,
     `Models       ${formatModels(snapshot)}`,
     `Prices       ${formatPrices(snapshot.prices)}`,
-    `Fast         ${formatFast(snapshot)}    Paused  ${snapshot.paused ? "yes" : "no"}`,
+    `Fast         ${formatFast(snapshot)}    Paused  ${snapshot.paused ? "yes" : "no"}    Footer  ${snapshot.footer ? "custom" : "pi stock"}`,
     `Management   ${formatManagement(snapshot.management)}`,
     `Web search   ${formatSearchModel(snapshot.searchModel)}`,
     `Thinking     ${formatThinking(snapshot.thinking)}`,

@@ -30,6 +30,8 @@ export interface CliproxyConfig extends ConnectionValues {
   providerName?: string;
   fast?: boolean;
   pause?: boolean;
+  /** Own the footer with account usage rows. Defaults to true; false restores pi's stock footer. */
+  footer?: boolean;
   /** CLIProxyAPI management key. Unlocks the usage footer and account-wide hiding. */
   managementKey?: string;
   thinkingDisplay?: Readonly<Record<string, ThoughtSummary>>;
@@ -76,6 +78,7 @@ const ConfigFileSchema = Type.Object({
   apiKey: OptionalString,
   baseUrl: OptionalString,
   fast: Type.Optional(Type.Boolean()),
+  footer: Type.Optional(Type.Boolean()),
   managementKey: OptionalString,
   pause: Type.Optional(Type.Boolean()),
   providerId: OptionalString,
@@ -92,6 +95,9 @@ const ConfigFileSchema = Type.Object({
 const RefreshMetaSchema = Type.Object({ baseUrl: OptionalString });
 
 const SettingsFileSchema = Type.Object({
+  compaction: Type.Optional(
+    Type.Object({ enabled: Type.Optional(Type.Boolean()) })
+  ),
   defaultModel: OptionalString,
   defaultProvider: OptionalString,
 });
@@ -122,6 +128,7 @@ export const loadCliproxyConfig = (agentDir: string): CliproxyConfig => {
     apiKey: nonEmpty(value.apiKey),
     baseUrl: nonEmpty(value.baseUrl),
     fast: value.fast,
+    footer: value.footer,
     managementKey: nonEmpty(value.managementKey),
     pause: value.pause,
     providerId: nonEmpty(value.providerId),
@@ -232,6 +239,20 @@ export const resolveExtensionConnection = (
     loadCliproxyConfig(options.agentDir),
     stored
   );
+};
+
+/** Whether pi's automatic compaction is on in settings.json. Defaults to true, as pi does. */
+export const loadAutoCompactEnabled = (agentDir: string): boolean => {
+  try {
+    const settings = readJsonMemo(
+      path.join(agentDir, "settings.json"),
+      SettingsFileSchema
+    );
+
+    return settings?.compaction?.enabled ?? true;
+  } catch {
+    return true;
+  }
 };
 
 export const isModelReferencedAsDefault = (

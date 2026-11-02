@@ -8,7 +8,7 @@ The extension sends each model through the API that suits it. Claude and Kimi mo
 
 - A model list that comes from your CLIProxyAPI server, with the context windows and reasoning levels the server reports, and prices from [models.dev](https://models.dev)
 - A `web_search` tool that runs searches through CLIProxyAPI and estimates what each search cost, when the server reports token usage
-- A footer that shows tokens per second, and account usage if you add a management key
+- A footer that shows your accounts' usage windows with bars and reset countdowns, the context window fill, token and cost totals, and the run's elapsed time. Set `"footer": false` to go back to pi's stock footer
 - Commands for Fast mode, pausing requests, and adding upstream accounts
 
 ## Requirements
@@ -63,6 +63,7 @@ You can put settings in `~/.pi/agent/cliproxyapi.json`. Every field is optional:
   "apiKey": "your-key",
   "managementKey": "your-management-key",
   "fast": false,
+  "footer": true,
   "pause": false,
   "searchModel": "<model-id>",
   "thinkingDisplay": { "<model-id>": "summarized" },
@@ -74,6 +75,7 @@ You can put settings in `~/.pi/agent/cliproxyapi.json`. Every field is optional:
 The fields work as follows:
 
 - `managementKey` is the CLIProxyAPI management key. It turns on the usage footer, `/cliproxyapi-login`, and `/cliproxyapi-reset`. You can also set it with the `CLIPROXY_MANAGEMENT_KEY` environment variable.
+- `footer` turns the custom footer on or off. It defaults to true. Set it to false to restore pi's stock footer, with the account usage shown on one plain line instead.
 - `thinkingDisplay` sets, per model, whether the model sends thought summaries. It applies to models that use the Anthropic Messages API with thinking turned on. The default is `omitted`, because Claude streams its answer only when summaries are off. Set a model to `summarized` to see its summaries.
 - `searchModel` sets the model for `web_search`. When it's empty, the extension picks one.
 - `providerId` is the provider ID that pi uses in model names, e.g., `cliproxyapi/<model-id>`, and in `/login`. If you change it, pi looks for the login under the new ID, so you need to log in again. `providerName` is the name pi shows. The environment variables `CLIPROXYAPI_PROVIDER_ID` and `CLIPROXYAPI_PROVIDER_NAME` do the same.

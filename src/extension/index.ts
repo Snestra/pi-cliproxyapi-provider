@@ -14,13 +14,14 @@ import { completeFrom } from "./completions.ts";
 import {
   defaultConnectionBaseUrl,
   isModelReferencedAsDefault,
+  loadAutoCompactEnabled,
   loadCliproxyConfig,
   loadStoredConnection,
   resolveExtensionConnection,
   resolveIdentity,
 } from "./config.ts";
 import { FastModeController, toggleFastMode } from "./fast.ts";
-import { FastFooterController } from "./footer.ts";
+import { FooterController } from "./footer.ts";
 import { registerOAuthLogin } from "./oauth.ts";
 import { PauseController, registerPause } from "./pause.ts";
 import { PriceCache } from "./prices.ts";
@@ -56,7 +57,7 @@ const registerCatalogCommands = (
   providerId: string,
   fast: FastModeController,
   controller: ExtensionProviderController,
-  footer: FastFooterController,
+  footer: FooterController,
   usage: UsageHandle
 ): void => {
   let fastChangePending = false;
@@ -276,7 +277,17 @@ export default async function cliproxyapiProvider(
   latestModels = controller.getModels();
   pi.registerProvider(controller.provider);
 
-  const footer = new FastFooterController(providerId, fast, pause);
+  const footer = new FooterController(providerId, fast, pause, {
+    agentDir,
+    autoCompact: () => loadAutoCompactEnabled(agentDir),
+    enabled: () => loadCliproxyConfig(agentDir).footer ?? true,
+    getSegments: (ctx) =>
+      tracker.segments(
+        controller.getModels().map((model) => model.id),
+        ctx.model?.provider === providerId ? ctx.model.id : undefined
+      ),
+  });
+
   footer.register(pi);
   registerPause(pi, agentDir, pause);
   registerTpsFooter(pi, pause, providerId);
@@ -410,6 +421,7 @@ export default async function cliproxyapiProvider(
         catalogFetchedAt > 0 ? ageSince(catalogFetchedAt) : undefined,
       fast: fast.isEnabled(),
       fastModels: models.filter((model) => model.supportsFast).length,
+      footer: current.footer ?? true,
       keySource: sources.apiKey,
       management: management && {
         source: management.source,
