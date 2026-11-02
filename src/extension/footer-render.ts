@@ -1,4 +1,4 @@
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import path from "node:path";
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
@@ -16,8 +16,8 @@ export type UsageSegment =
 
 /** The slice of pi's Theme the renderer needs. Pi's Theme satisfies this structurally. */
 export interface Paint {
-  fg(color: string, text: string): string;
-  bold(text: string): string;
+  fg: (color: string, text: string) => string;
+  bold: (text: string) => string;
 }
 
 const FULL = "█";
@@ -43,8 +43,10 @@ export const bar = (percent: number, cells: number, paint: Paint): string => {
   const eighths = Math.round((clamped / 100) * cells * EIGHTHS);
   const full = Math.floor(eighths / EIGHTHS);
   const partial = eighths % EIGHTHS;
+
   const fill =
     FULL.repeat(full) + (partial > 0 ? (PARTIALS[partial - 1] ?? "") : "");
+
   const track = TRACK.repeat(Math.max(0, cells - full - (partial > 0 ? 1 : 0)));
   const color = severity(clamped) ?? "syntaxKeyword";
   const paintedFill = fill ? paint.fg(color, fill) : "";
@@ -106,7 +108,10 @@ const renderSegment = (
   options: SegmentOptions
 ): string => {
   if (segment.kind === "model-out") {
-    return paint.fg("error", `${segment.modelId} ⏸ ${outUntil(segment.until, now)}`);
+    return paint.fg(
+      "error",
+      `${segment.modelId} ⏸ ${outUntil(segment.until, now)}`
+    );
   }
 
   const marker = segment.current ? paint.fg("accent", "▸") : "";
@@ -125,6 +130,7 @@ const renderSegment = (
       options.countdowns && window.resetAt !== undefined
         ? countdown(window.resetAt, now)
         : "";
+
     const resetText = reset ? ` ${paint.fg("dim", reset)}` : "";
 
     return `${paint.fg("dim", window.label)} ${bar(window.usedPercent, options.cells, paint)} ${percentText(window.usedPercent, paint)}${resetText}`;
@@ -139,11 +145,17 @@ const renderPlainSegment = (
   now: number
 ): string => {
   if (segment.kind === "model-out") {
-    return paint.fg("error", `${segment.modelId} ⏸ ${outUntil(segment.until, now)}`);
+    return paint.fg(
+      "error",
+      `${segment.modelId} ⏸ ${outUntil(segment.until, now)}`
+    );
   }
 
   if (segment.kind === "out") {
-    return paint.fg("error", `${segment.name} ⏸ ${outUntil(segment.until, now)}`);
+    return paint.fg(
+      "error",
+      `${segment.name} ⏸ ${outUntil(segment.until, now)}`
+    );
   }
 
   if (segment.kind === "unknown") {
@@ -181,7 +193,9 @@ const isImportant = (segment: UsageSegment): boolean => {
   if (segment.kind === "windows") {
     return (
       segment.current ||
-      segment.windows.some((window) => severity(window.usedPercent) !== undefined)
+      segment.windows.some(
+        (window) => severity(window.usedPercent) !== undefined
+      )
     );
   }
 
@@ -231,8 +245,11 @@ const wrapSegments = (
 const joinRow = (parts: readonly string[], paint: Paint): string =>
   parts.join(paint.fg("dim", " │ "));
 
-const fitsOneRow = (parts: readonly string[], paint: Paint, width: number): boolean =>
-  visibleWidth(joinRow(parts, paint)) <= width;
+const fitsOneRow = (
+  parts: readonly string[],
+  paint: Paint,
+  width: number
+): boolean => visibleWidth(joinRow(parts, paint)) <= width;
 
 /**
  * Account rows for the owned footer. The ladder drops countdowns, then bar
@@ -319,13 +336,14 @@ export const formatAccountRows = (
     return wrapped;
   }
 
-  const rows = wrapSegments(importantOnly, paint, width, parts.length) ?? [
-    joinRow(importantOnly, paint),
-  ];
+  const rows = wrapSegments(
+    importantOnly,
+    paint,
+    width,
+    importantOnly.length
+  ) ?? [joinRow(importantOnly, paint)];
 
-  return rows.map((row) =>
-    truncateToWidth(row, width, paint.fg("dim", "..."))
-  );
+  return rows.map((row) => truncateToWidth(row, width, paint.fg("dim", "...")));
 };
 
 /** Pi's token thresholds: 999, 1.0k under 10k, 999k, 1.0M under 10M, then whole millions. */
@@ -355,18 +373,19 @@ export const formatCwd = (cwd: string, home: string | undefined): string => {
     return cwd;
   }
 
-  const relativeToHome = relative(resolve(home), resolve(cwd));
+  const relativeToHome = path.relative(path.resolve(home), path.resolve(cwd));
+
   const isInsideHome =
     relativeToHome === "" ||
     (relativeToHome !== ".." &&
-      !relativeToHome.startsWith(`..${sep}`) &&
-      !isAbsolute(relativeToHome));
+      !relativeToHome.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(relativeToHome));
 
   if (!isInsideHome) {
     return cwd;
   }
 
-  return relativeToHome === "" ? "~" : `~${sep}${relativeToHome}`;
+  return relativeToHome === "" ? "~" : `~${path.sep}${relativeToHome}`;
 };
 
 /** The context part of row 1: a 10-cell bar, the percent, and the window size. */
@@ -378,13 +397,19 @@ export const contextSegment = (
 ): string => {
   const pct = percent === null ? "?" : percent.toFixed(1);
   const suffix = auto ? " (auto)" : "";
-  const display = `${pct}%/${formatTokens(contextWindow)}${suffix}`;
-  const colored =
-    percent !== null && percent > 90
-      ? paint.fg("error", display)
-      : percent !== null && percent > 70
-        ? paint.fg("warning", display)
-        : display;
+
+  const display =
+    percent === null
+      ? `?/${formatTokens(contextWindow)}${suffix}`
+      : `${pct}%/${formatTokens(contextWindow)}${suffix}`;
+
+  let colored = display;
+
+  if (percent !== null && percent > 90) {
+    colored = paint.fg("error", display);
+  } else if (percent !== null && percent > 70) {
+    colored = paint.fg("warning", display);
+  }
 
   return `${paint.fg("dim", "ctx")} ${bar(percent ?? 0, 10, paint)} ${colored}`;
 };

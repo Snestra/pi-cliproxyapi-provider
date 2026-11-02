@@ -17,8 +17,9 @@ import {
 import type { ProviderUsage } from "../core/index.ts";
 import { loadCliproxyConfig, resolveExtensionConnection } from "./config.ts";
 import { readJsonMemo, writeJsonAtomic } from "./files.ts";
-import type { Paint, UsageSegment } from "./footer-render.ts";
+import type { UsageSegment } from "./footer-render.ts";
 import { formatStatusLine, outUntil } from "./footer-render.ts";
+import { themePaint } from "./footer.ts";
 
 /** Shared by every pi process, so a quota error in one agent hides the model in all of them. */
 export const USAGE_FILE_NAME = "cliproxyapi-usage.json";
@@ -471,6 +472,7 @@ export class UsageTracker {
 
       const current =
         currentModelId !== undefined && models.includes(currentModelId);
+
       const returns = models.map((model) => hidden.get(model));
 
       if (returns.every((time) => time !== undefined)) {
@@ -495,13 +497,21 @@ export class UsageTracker {
         current,
         kind: "windows",
         name: account.name,
-        windows: account.windows.map((window) => ({
-          label: window.label,
-          ...(window.resetAt === undefined
-            ? {}
-            : { resetAt: window.resetAt }),
-          usedPercent: window.usedPercent,
-        })),
+        windows: account.windows.map((window) => {
+          const mapped: Extract<
+            UsageSegment,
+            { kind: "windows" }
+          >["windows"][number] = {
+            label: window.label,
+            usedPercent: window.usedPercent,
+          };
+
+          if (window.resetAt !== undefined) {
+            mapped.resetAt = window.resetAt;
+          }
+
+          return mapped;
+        }),
       });
     }
 
@@ -598,8 +608,7 @@ export const registerUsage = (
           options.getCatalogIds(),
           ctx.model?.provider === providerId ? ctx.model.id : undefined
         ),
-        // SAFETY: Pi's Theme fg/bold match the Paint shape at runtime; its ThemeColor union is narrower than Paint's string, so the cast goes through unknown.
-        ctx.ui.theme as unknown as Paint,
+        themePaint(ctx.ui.theme),
         Date.now()
       )
     );
