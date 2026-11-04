@@ -17,6 +17,8 @@
  * wrapCliproxyStreams(streams: ProviderStreams, settings: PayloadSettings): ProviderStreams
  * createCliproxyProvider(options: CliproxyProviderOptions): Provider<CliproxyApi>
  * quotaResetFromError(message: string, now?: number, fallbackAt?: number): number | undefined
+ * refreshServerCatalog(options: OAuthRequestOptions): Promise<boolean>
+ * listAccounts(options: OAuthRequestOptions): Promise<Account[]>
  * startOAuth(options: StartOAuthOptions): Promise<OAuthStart>
  * submitOAuthCallback(options: SubmitOAuthCallbackOptions): Promise<OAuthStatus>
  * pollOAuthStatus(options: PollOAuthStatusOptions): Promise<OAuthStatus>
@@ -94,9 +96,12 @@ export {
 } from "./costs.ts";
 
 export {
+  listAccounts,
   pollOAuthStatus,
+  refreshServerCatalog,
   startOAuth,
   submitOAuthCallback,
+  type Account,
   type OAuthRequestOptions,
   type OAuthStart,
   type OAuthStatus,

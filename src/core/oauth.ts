@@ -18,7 +18,16 @@ export interface OAuthRequestOptions {
   timeoutMs?: number;
 }
 
+export interface Account {
+  authIndex: string;
+  name: string;
+  provider: string;
+  label: string;
+  disabled: boolean;
+}
+
 export interface StartOAuthOptions extends OAuthRequestOptions {
+  authIndex?: string;
   /**
    * CLIProxyAPI provider id: `claude`, `codex`, `antigravity`, `kimi`,
    * `kimi-ai`, `xai`, `devin`, `meta`, or a registered plugin provider id.
@@ -82,6 +91,24 @@ const StatusSchema = Type.Object({
   ]),
 });
 
+const RefreshSchema = Type.Object({
+  changed_providers: Type.Optional(Type.Array(Type.String())),
+  ok: Type.Boolean(),
+});
+
+const AccountsSchema = Type.Object({
+  files: Type.Array(
+    Type.Object({
+      auth_index: Type.String(),
+      disabled: Type.Optional(Type.Boolean()),
+      email: Type.Optional(Type.Union([Type.String(), Type.Null()])),
+      label: Type.Optional(Type.String()),
+      name: Type.String(),
+      provider: Type.String(),
+    })
+  ),
+});
+
 const ErrorSchema = Type.Object({
   error: Type.Optional(Type.String()),
 });
@@ -112,6 +139,16 @@ const nonEmpty = (value: string | undefined, name: string): string => {
 const managementUrl = (baseUrl: string): string =>
   `${resolveEndpoints(baseUrl).rootUrl}/v8/management`;
 
+class ManagementHttpError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "ManagementHttpError";
+    this.status = status;
+  }
+}
+
 const request = async <Schema extends TSchema>(
   options: OAuthRequestOptions,
   route: string,
@@ -139,7 +176,8 @@ const request = async <Schema extends TSchema>(
   if (!response.ok) {
     const detail = parseJson(ErrorSchema, text)?.error;
 
-    throw new Error(
+    throw new ManagementHttpError(
+      response.status,
       `CLIProxyAPI management ${routePath} returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`
     );
   }
@@ -153,6 +191,38 @@ const request = async <Schema extends TSchema>(
   }
 
   return value;
+};
+
+export const refreshServerCatalog = async (
+  options: OAuthRequestOptions
+): Promise<boolean> => {
+  try {
+    await request(options, "/models/refresh", RefreshSchema, {
+      method: "POST",
+    });
+
+    return true;
+  } catch (error) {
+    if (error instanceof ManagementHttpError && error.status === 404) {
+      return false;
+    }
+
+    throw error;
+  }
+};
+
+export const listAccounts = async (
+  options: OAuthRequestOptions
+): Promise<Account[]> => {
+  const result = await request(options, "/credentials", AccountsSchema);
+
+  return result.files.map((file) => ({
+    authIndex: file.auth_index,
+    disabled: file.disabled ?? false,
+    label: file.label ?? file.email ?? file.name,
+    name: file.name,
+    provider: file.provider,
+  }));
 };
 
 interface OAuthCallbackBody {
@@ -176,8 +246,16 @@ export const startOAuth = async (
 
   const result = await request(
     options,
-    `/oauth/auth-url?provider=${encodeURIComponent(provider)}`,
-    StartSchema
+    options.authIndex === undefined
+      ? `/oauth/auth-url?provider=${encodeURIComponent(provider)}`
+      : "/oauth/auth-url",
+    StartSchema,
+    options.authIndex === undefined
+      ? {}
+      : {
+          body: JSON.stringify({ auth_index: options.authIndex, provider }),
+          method: "POST",
+        }
   );
 
   const start: OAuthStart = { state: result.state, url: result.url };

@@ -44,8 +44,8 @@ The extension looks for each value in the environment first, then in `~/.pi/agen
 | --- | --- |
 | `/login cliproxyapi` | Saves the server address and API key |
 | `/cliproxyapi-status` | Shows the connection, model count, prices, and settings |
-| `/cliproxyapi-refresh` | Loads the model list from the server again |
-| `/cliproxyapi-login <provider>` | Adds an upstream account to CLIProxyAPI, e.g., `claude` or `codex` |
+| `/cliproxyapi-refresh` | Reloads server model definitions when a management key is set, then loads the model list again |
+| `/cliproxyapi-login <provider> [account]` | Adds an upstream account or signs in again to an existing account by label, file name, or auth index |
 | `/cliproxyapi-reset [model-id]` | Clears CLIProxyAPI cooldowns for every account, or only for the accounts that serve one model |
 | `/fast` | Turns Fast mode on or off for models that support it |
 | `/pause` and `/continue` | Holds provider requests until you continue |
@@ -74,7 +74,7 @@ You can put settings in `~/.pi/agent/cliproxyapi.json`. Every field is optional:
 
 The fields work as follows:
 
-- `managementKey` is the CLIProxyAPI management key. It turns on the usage footer, `/cliproxyapi-login`, and `/cliproxyapi-reset`. You can also set it with the `CLIPROXY_MANAGEMENT_KEY` environment variable.
+- `managementKey` is the CLIProxyAPI management key. It turns on the usage footer, `/cliproxyapi-login`, `/cliproxyapi-reset`, and server model definition reloads in `/cliproxyapi-refresh`. You can also set it with the `CLIPROXY_MANAGEMENT_KEY` environment variable.
 - `footer` turns the custom footer on or off. It defaults to true. Set it to false to restore pi's stock footer, with the account usage shown on one plain line instead.
 - `thinkingDisplay` sets, per model, whether the model sends thought summaries. It applies to models that use the Anthropic Messages API with thinking turned on. The default is `omitted`, because Claude streams its answer only when summaries are off. Set a model to `summarized` to see its summaries.
 - `searchModel` sets the model for `web_search`. When it's empty, the extension picks one.

@@ -5,6 +5,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import {
+  refreshServerCatalog,
   resolveConnectionSources,
   resolveEndpoints,
   withoutStale,
@@ -58,7 +59,8 @@ const registerCatalogCommands = (
   fast: FastModeController,
   controller: ExtensionProviderController,
   footer: FooterController,
-  usage: UsageHandle
+  usage: UsageHandle,
+  tracker: UsageTracker
 ): void => {
   let fastChangePending = false;
   pi.registerCommand("fast", {
@@ -137,6 +139,19 @@ const registerCatalogCommands = (
         ctx.ui.notify("Usage: /cliproxyapi-refresh", "error");
 
         return;
+      }
+
+      const access = tracker.managementAccess();
+
+      if (access) {
+        try {
+          await refreshServerCatalog({ ...access, signal: ctx.signal });
+        } catch (error) {
+          ctx.ui.notify(
+            `CLIProxyAPI could not reload its model definitions: ${error instanceof Error ? error.message : String(error)}`,
+            "warning"
+          );
+        }
       }
 
       try {
@@ -373,7 +388,8 @@ export default async function cliproxyapiProvider(
     fast,
     controller,
     footer,
-    usage
+    usage,
+    tracker
   );
   registerOAuthLogin(pi, {
     providerId,

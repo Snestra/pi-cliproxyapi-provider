@@ -4,10 +4,12 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import {
+  listAccounts,
   pollOAuthStatus,
   startOAuth,
   submitOAuthCallback,
 } from "../core/index.ts";
+import type { Account } from "../core/index.ts";
 import { completeFrom } from "./completions.ts";
 import { MANAGEMENT_KEY_ENV } from "./usage.ts";
 import type { UsageTracker } from "./usage.ts";
@@ -33,26 +35,118 @@ const LOGIN_PROVIDERS = [
 
 const KNOWN_PROVIDERS = `${LOGIN_PROVIDERS.join(", ")}, or a plugin provider id`;
 
-const PROVIDER_WITH_SPACE = /\s/u;
+const LOGIN_ARGUMENTS = /^(?<provider>\S+)(?:\s+(?<account>[\s\S]*))?$/u;
 
-/** The provider argument, or a picked one when bare with a UI. `undefined` means the picker was cancelled. */
+/** An undefined provider means the picker was cancelled. */
 const chooseProvider = async (
   args: string,
   ctx: ExtensionContext
-): Promise<string | undefined> => {
-  const provider = args.trim();
+): Promise<{ provider: string | undefined; account: string }> => {
+  const { provider = "", account = "" } =
+    LOGIN_ARGUMENTS.exec(args.trim())?.groups ?? {};
 
   if (provider || !ctx.hasUI) {
-    return provider;
+    return { account: account.trim(), provider };
   }
 
-  return await ctx.ui.select("CLIProxyAPI account provider", [
-    ...LOGIN_PROVIDERS,
+  return {
+    account: "",
+    provider: await ctx.ui.select("CLIProxyAPI account provider", [
+      ...LOGIN_PROVIDERS,
+    ]),
+  };
+};
+
+const chooseAccount = async (
+  accounts: Account[],
+  provider: string,
+  argument: string,
+  ctx: ExtensionContext
+): Promise<Account | null | undefined> => {
+  if (argument) {
+    const search = argument.toLowerCase();
+
+    const matches = accounts.filter((account) =>
+      [account.label, account.name, account.authIndex].some(
+        (value) => value.toLowerCase() === search
+      )
+    );
+
+    if (matches.length === 0) {
+      ctx.ui.notify(
+        accounts.length > 0
+          ? `No ${provider} account matches "${argument}". Available accounts: ${accounts.map((account) => account.label).join(", ")}.`
+          : `No ${provider} accounts are available.`,
+        "error"
+      );
+
+      return;
+    }
+
+    if (matches.length > 1) {
+      ctx.ui.notify(
+        `More than one ${provider} account matches "${argument}". Use the file name: ${matches.map((account) => account.name).join(", ")}.`,
+        "error"
+      );
+
+      return;
+    }
+
+    return matches[0];
+  }
+
+  if (!ctx.hasUI || accounts.length === 0) {
+    return null;
+  }
+
+  const choices = accounts.map((account) => {
+    const duplicateLabel = accounts.some(
+      (other) => other !== account && other.label === account.label
+    );
+
+    return `Sign in again: ${account.label}${duplicateLabel ? ` (${account.name})` : ""}${account.disabled ? " (disabled)" : ""}`;
+  });
+
+  const addNew = `Add a new ${provider} account`;
+
+  const selected = await ctx.ui.select("CLIProxyAPI account", [
+    addNew,
+    ...choices,
   ]);
+
+  if (selected === undefined) {
+    return;
+  }
+
+  return selected === addNew ? null : accounts[choices.indexOf(selected)];
+};
+
+const refreshAfterLogin = async (
+  options: RegisterOAuthLoginOptions,
+  ctx: ExtensionContext,
+  provider: string,
+  account: Account | null
+): Promise<void> => {
+  const signedIn = account
+    ? `Signed in to the ${provider} account ${account.label} again`
+    : `Added the ${provider} account to CLIProxyAPI`;
+
+  try {
+    await options.refresh(ctx);
+  } catch (error) {
+    ctx.ui.notify(
+      `${signedIn}, but refreshing models failed: ${error instanceof Error ? error.message : String(error)}`,
+      "warning"
+    );
+
+    return;
+  }
+
+  ctx.ui.notify(`${signedIn} and refreshed the model catalog.`, "info");
 };
 
 /**
- * Registers /cliproxyapi-login <provider>: starts an upstream account login
+ * Registers /cliproxyapi-login <provider> [account]: starts an upstream account login
  * on the CLIProxyAPI server, asks for the browser's redirect URL, submits
  * it, and waits for the server to finish the credential exchange.
  */
@@ -61,7 +155,7 @@ export const registerOAuthLogin = (
   options: RegisterOAuthLoginOptions
 ): void => {
   pi.registerCommand("cliproxyapi-login", {
-    description: `Add an upstream account to CLIProxyAPI (/cliproxyapi-login <provider>: ${KNOWN_PROVIDERS}).`,
+    description: `Add an upstream account or sign in again (/cliproxyapi-login <provider> [account]: ${KNOWN_PROVIDERS}).`,
     getArgumentCompletions: (prefix) => completeFrom(LOGIN_PROVIDERS, prefix),
     handler: async (args, ctx) => {
       // Check the setup first, so the picker never opens for a login that cannot run.
@@ -85,15 +179,18 @@ export const registerOAuthLogin = (
         return;
       }
 
-      const provider = await chooseProvider(args, ctx);
+      const { provider, account: accountArgument } = await chooseProvider(
+        args,
+        ctx
+      );
 
       if (provider === undefined) {
         return;
       }
 
-      if (!provider || PROVIDER_WITH_SPACE.test(provider)) {
+      if (!provider) {
         ctx.ui.notify(
-          `Usage: /cliproxyapi-login <provider> (${KNOWN_PROVIDERS})`,
+          `Usage: /cliproxyapi-login <provider> [account] (${KNOWN_PROVIDERS})`,
           "error"
         );
 
@@ -104,7 +201,29 @@ export const registerOAuthLogin = (
       const { signal } = ctx;
 
       try {
+        const allAccounts = await listAccounts({
+          baseUrl,
+          managementKey,
+          signal,
+        });
+
+        const accounts = allAccounts.filter(
+          (account) => account.provider.toLowerCase() === provider.toLowerCase()
+        );
+
+        const account = await chooseAccount(
+          accounts,
+          provider,
+          accountArgument,
+          ctx
+        );
+
+        if (account === undefined) {
+          return;
+        }
+
         const start = await startOAuth({
+          authIndex: account?.authIndex,
           baseUrl,
           managementKey,
           provider,
@@ -168,21 +287,7 @@ export const registerOAuthLogin = (
           return;
         }
 
-        try {
-          await options.refresh(ctx);
-        } catch (error) {
-          ctx.ui.notify(
-            `Added the ${provider} account to CLIProxyAPI, but refreshing models failed: ${error instanceof Error ? error.message : String(error)}`,
-            "warning"
-          );
-
-          return;
-        }
-
-        ctx.ui.notify(
-          `Added the ${provider} account to CLIProxyAPI and refreshed the model catalog.`,
-          "info"
-        );
+        await refreshAfterLogin(options, ctx, provider, account);
       } catch (error) {
         if (signal?.aborted) {
           ctx.ui.notify(
