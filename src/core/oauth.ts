@@ -102,7 +102,7 @@ const AccountsSchema = Type.Object({
       auth_index: Type.String(),
       disabled: Type.Optional(Type.Boolean()),
       email: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-      label: Type.Optional(Type.String()),
+      label: Type.Optional(Type.Union([Type.String(), Type.Null()])),
       name: Type.String(),
       provider: Type.String(),
     })
@@ -219,7 +219,7 @@ export const listAccounts = async (
   return result.files.map((file) => ({
     authIndex: file.auth_index,
     disabled: file.disabled ?? false,
-    label: file.label ?? file.email ?? file.name,
+    label: file.label || file.email || file.name,
     name: file.name,
     provider: file.provider,
   }));
