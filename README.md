@@ -67,6 +67,8 @@ You can put settings in `~/.pi/agent/cliproxyapi.json`. Every field is optional:
   "pause": false,
   "searchModel": "<model-id>",
   "thinkingDisplay": { "<model-id>": "summarized" },
+  "maxTokens": { "<model-id>": 262144 },
+  "imageInput": { "<model-id>": false },
   "providerId": "cliproxyapi",
   "providerName": "CLIProxyAPI"
 }
@@ -77,6 +79,8 @@ The fields work as follows:
 - `managementKey` is the CLIProxyAPI management key. It turns on the usage footer, `/cliproxyapi-login`, `/cliproxyapi-reset`, and server model definition reloads in `/cliproxyapi-refresh`. You can also set it with the `CLIPROXY_MANAGEMENT_KEY` environment variable.
 - `footer` turns the custom footer on or off. It defaults to true. Set it to false to restore pi's stock footer, with the account usage shown on one plain line instead.
 - `thinkingDisplay` sets, per model, whether the model sends thought summaries. It applies to models that use the Anthropic Messages API with thinking turned on. The default is `omitted`, because Claude streams its answer only when summaries are off. Set a model to `summarized` to see its summaries.
+- `maxTokens` sets, per model, the most output tokens pi asks for. Use it for models that CLIProxyAPI lists without an output limit, such as API-key upstreams. Those models otherwise get 16,384. pi still trims each request to the context that is left.
+- `imageInput` sets, per model, whether pi may send images. Set a model to `false` when CLIProxyAPI lists image input for a text-only upstream, or to `true` for the reverse.
 - `searchModel` sets the model for `web_search`. When it's empty, the extension picks one.
 - `providerId` is the provider ID that pi uses in model names, e.g., `cliproxyapi/<model-id>`, and in `/login`. If you change it, pi looks for the login under the new ID, so you need to log in again. `providerName` is the name pi shows. The environment variables `CLIPROXYAPI_PROVIDER_ID` and `CLIPROXYAPI_PROVIDER_NAME` do the same.
 

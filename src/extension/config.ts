@@ -35,6 +35,8 @@ export interface CliproxyConfig extends ConnectionValues {
   /** CLIProxyAPI management key. Unlocks the usage footer and account-wide hiding. */
   managementKey?: string;
   thinkingDisplay?: Readonly<Record<string, ThoughtSummary>>;
+  maxTokens?: Readonly<Record<string, number>>;
+  imageInput?: Readonly<Record<string, boolean>>;
   searchModel?: string;
 }
 
@@ -79,7 +81,11 @@ const ConfigFileSchema = Type.Object({
   baseUrl: OptionalString,
   fast: Type.Optional(Type.Boolean()),
   footer: Type.Optional(Type.Boolean()),
+  imageInput: Type.Optional(Type.Record(Type.String(), Type.Boolean())),
   managementKey: OptionalString,
+  maxTokens: Type.Optional(
+    Type.Record(Type.String(), Type.Integer({ minimum: 1 }))
+  ),
   pause: Type.Optional(Type.Boolean()),
   providerId: OptionalString,
   providerName: OptionalString,
@@ -129,7 +135,9 @@ export const loadCliproxyConfig = (agentDir: string): CliproxyConfig => {
     baseUrl: nonEmpty(value.baseUrl),
     fast: value.fast,
     footer: value.footer,
+    imageInput: { ...value.imageInput },
     managementKey: nonEmpty(value.managementKey),
+    maxTokens: { ...value.maxTokens },
     pause: value.pause,
     providerId: nonEmpty(value.providerId),
     providerName: nonEmpty(value.providerName),

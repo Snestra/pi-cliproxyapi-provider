@@ -107,6 +107,10 @@ export interface MappingOptions {
   costs?: CostCatalog;
   fast?: () => boolean;
   thoughtSummaries?: Readonly<Record<string, ThoughtSummary>>;
+  /** Output token limits by model id, for upstreams the catalog lists without one. */
+  maxTokens?: Readonly<Record<string, number>>;
+  /** Image input by model id, for upstreams the catalog lists with the wrong modalities. */
+  imageInput?: Readonly<Record<string, boolean>>;
   /** Prompt cache lifetimes by model id. Core has no built-in numbers. */
   promptCache?: (id: string) => ModelPromptCache | undefined;
 }
@@ -192,7 +196,23 @@ const positive = (...values: (number | undefined)[]): number | undefined =>
     (value) => value !== undefined && Number.isFinite(value) && value > 0
   );
 
-const capabilities = (entry: CatalogModel) => {
+/** Applies a configured image input setting. Undefined keeps the catalog's modalities. */
+export const withImageInput = (
+  input: readonly ("text" | "image")[],
+  image: boolean | undefined
+): ("text" | "image")[] => {
+  if (image === undefined) {
+    return [...input];
+  }
+
+  return image ? ["text", "image"] : ["text"];
+};
+
+const capabilities = (
+  entry: CatalogModel,
+  id: string,
+  { imageInput, maxTokens }: Pick<MappingOptions, "imageInput" | "maxTokens">
+) => {
   const efforts = (entry.supported_reasoning_levels ?? [])
     .map((level) => {
       const effort = Value.Check(EffortName, level)
@@ -220,9 +240,10 @@ const capabilities = (entry: CatalogModel) => {
   return {
     contextWindow:
       positive(entry.context_window, entry.max_context_window) ?? 128_000,
-    input,
+    input: withImageInput(input, imageInput?.[id]),
     maxTokens:
       positive(
+        maxTokens?.[id],
         entry.max_tokens,
         entry.max_output_tokens,
         entry.max_completion_tokens
@@ -280,7 +301,7 @@ export const mapCatalog = (
     const supportsFast = (entry.service_tiers?.length ?? 0) > 0;
 
     const model: CliproxyModel = {
-      ...capabilities(entry),
+      ...capabilities(entry, id, options),
       api,
       baseUrl:
         api === "anthropic-messages"

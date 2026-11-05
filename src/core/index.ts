@@ -54,6 +54,7 @@ export {
   mapCatalog,
   mergeCatalog,
   selectModelApi,
+  withImageInput,
   withoutStale,
   type CatalogFetchOptions,
   type CatalogModel,

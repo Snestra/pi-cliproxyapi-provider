@@ -15,6 +15,7 @@ import {
   matchModelCost,
   mergeCatalog,
   resolveEndpoints,
+  withImageInput,
 } from "../core/index.ts";
 import type {
   CliproxyApi,
@@ -109,6 +110,8 @@ export const createExtensionProvider = (
   let currentModels: CliproxyModel[] = (cached?.models ?? []).map((model) => {
     const loaded: CliproxyModel = {
       ...model,
+      input: withImageInput(model.input, config.imageInput?.[model.id]),
+      maxTokens: config.maxTokens?.[model.id] ?? model.maxTokens,
       thoughtSummary: config.thinkingDisplay?.[model.id] ?? "omitted",
     };
 
@@ -146,6 +149,8 @@ export const createExtensionProvider = (
     costsUrl: options.costsUrl,
     fast: options.fast.isEnabled,
     fetch: options.fetchFn,
+    imageInput: config.imageInput,
+    maxTokens: config.maxTokens,
     models: currentModels,
     promptCache: anthropicPromptCache,
     providerId: options.providerId,
@@ -180,6 +185,8 @@ export const createExtensionProvider = (
       baseUrl: connection.baseUrl,
       costs,
       fast: options.fast.isEnabled,
+      imageInput: config.imageInput,
+      maxTokens: config.maxTokens,
       promptCache: anthropicPromptCache,
       providerId: options.providerId,
       thoughtSummaries: config.thinkingDisplay,
