@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 import type {
@@ -24,6 +25,32 @@ import { themePaint } from "./footer.ts";
 /** Shared by every pi process, so a quota error in one agent hides the model in all of them. */
 export const USAGE_FILE_NAME = "cliproxyapi-usage.json";
 export const MANAGEMENT_KEY_ENV = "CLIPROXY_MANAGEMENT_KEY";
+
+const commandKeys = new Map<string, string | undefined>();
+
+/**
+ * A managementKey that starts with "!" is a shell command whose output is the key, as with keys in
+ * pi's auth.json. Each command runs once per process, and a failure stays cached, as in pi.
+ */
+const resolveKeyValue = (value: string): string | undefined => {
+  if (!value.startsWith("!")) {
+    return value;
+  }
+
+  if (!commandKeys.has(value)) {
+    const result = spawnSync("/bin/sh", ["-c", value.slice(1)], {
+      encoding: "utf-8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 10_000,
+    });
+
+    const key = result.status === 0 ? result.stdout.trim() : "";
+
+    commandKeys.set(value, key || undefined);
+  }
+
+  return commandKeys.get(value);
+};
 
 /** How old the shared usage snapshot may get before a session fetches a new one. */
 const USAGE_TTL_MS = 2 * 60_000;
@@ -104,7 +131,8 @@ export class UsageTracker {
       return { key: fromEnv, source: "env" };
     }
 
-    const fromFile = loadCliproxyConfig(this.options.agentDir).managementKey;
+    const configured = loadCliproxyConfig(this.options.agentDir).managementKey;
+    const fromFile = configured ? resolveKeyValue(configured) : undefined;
 
     return fromFile ? { key: fromFile, source: "cliproxyapi.json" } : undefined;
   }
