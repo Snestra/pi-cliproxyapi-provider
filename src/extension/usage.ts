@@ -20,7 +20,6 @@ import { loadCliproxyConfig, resolveExtensionConnection } from "./config.ts";
 import { readJsonMemo, writeJsonAtomic } from "./files.ts";
 import type { UsageSegment } from "./footer-render.ts";
 import { formatStatusLine, outUntil } from "./footer-render.ts";
-import { themePaint } from "./footer.ts";
 
 /** Shared by every pi process, so a quota error in one agent hides the model in all of them. */
 export const USAGE_FILE_NAME = "cliproxyapi-usage.json";
@@ -636,7 +635,6 @@ export const registerUsage = (
           options.getCatalogIds(),
           ctx.model?.provider === providerId ? ctx.model.id : undefined
         ),
-        themePaint(ctx.ui.theme),
         Date.now()
       )
     );
