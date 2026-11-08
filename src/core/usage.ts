@@ -56,6 +56,10 @@ const RESETS_AT_EPOCH = /"resets_at"\s*:\s*(?<seconds>\d{9,})/u;
 const RESETS_AT_ISO = /resets at (?<time>\d{4}-\d{2}-\d{2}T[\d:.]+Z)/iu;
 const RESETS_IN_SECONDS = /"resets_in_seconds"\s*:\s*(?<seconds>\d+)/u;
 const TRY_AGAIN_MINUTES = /try again in ~?\s*(?<minutes>\d+)\s*min/iu;
+const COOLDOWN_SECONDS = /"reset_seconds"\s*:\s*(?<seconds>\d+)/u;
+
+const COOLDOWN_AFTER =
+  /\(reset after (?=\d)(?:(?<hours>\d+)h)?(?:(?<minutes>\d+)m)?(?:(?<seconds>\d+)s)?\)/u;
 
 /** Parses a number or numeric string. Undefined for anything else, including NaN. */
 const finite = (value: string | number | undefined): number | undefined => {
@@ -73,6 +77,22 @@ const isoTime = (value: string | undefined): number | undefined => {
   const parsed = value === undefined ? Number.NaN : Date.parse(value);
 
   return Number.isNaN(parsed) ? undefined : parsed;
+};
+
+/** Milliseconds in a Go duration such as `2h30m0s`, as CLIProxyAPI writes a cooldown. */
+const cooldownAfterMs = (message: string): number | undefined => {
+  const groups = COOLDOWN_AFTER.exec(message)?.groups;
+
+  if (!groups) {
+    return undefined;
+  }
+
+  const { hours = "0", minutes = "0", seconds = "0" } = groups;
+
+  return (
+    (Number(hours) * 60 + Number(minutes)) * MINUTE_MS +
+    Number(seconds) * SECOND_MS
+  );
 };
 
 /**
@@ -94,11 +114,21 @@ export const quotaResetFromError = (
   const inSeconds = finite(RESETS_IN_SECONDS.exec(message)?.groups?.seconds);
   const inMinutes = finite(TRY_AGAIN_MINUTES.exec(message)?.groups?.minutes);
 
+  const cooldownSeconds = finite(
+    COOLDOWN_SECONDS.exec(message)?.groups?.seconds
+  );
+
+  const cooldownMs = cooldownAfterMs(message);
+
   const candidates = [
     epoch === undefined ? undefined : epoch * SECOND_MS,
     isoTime(RESETS_AT_ISO.exec(message)?.groups?.time),
     inSeconds === undefined ? undefined : now + inSeconds * SECOND_MS,
     inMinutes === undefined ? undefined : now + inMinutes * MINUTE_MS,
+    cooldownSeconds === undefined
+      ? undefined
+      : now + cooldownSeconds * SECOND_MS,
+    cooldownMs === undefined ? undefined : now + cooldownMs,
   ];
 
   return (
