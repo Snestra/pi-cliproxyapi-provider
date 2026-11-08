@@ -1274,10 +1274,10 @@ test("bar fills by eighths and clamps over 100", () => {
   assert.equal(bar(150, 5, identityPaint), "█████");
 });
 
-test("severity and bar colors follow the 75 and 90 thresholds", () => {
-  assert.equal(severity(74), undefined);
-  assert.equal(severity(75), "warning");
-  assert.equal(severity(90), "error");
+test("severity and bar colors follow the 25 and 10 percent left thresholds", () => {
+  assert.equal(severity(26), undefined);
+  assert.equal(severity(25), "warning");
+  assert.equal(severity(10), "error");
 
   const colors: string[] = [];
 
@@ -1290,13 +1290,13 @@ test("severity and bar colors follow the 75 and 90 thresholds", () => {
     },
   };
 
-  bar(12, 5, recording);
+  bar(88, 5, recording);
   assert.ok(colors.includes("syntaxKeyword"));
   colors.length = 0;
-  bar(84, 5, recording);
+  bar(16, 5, recording, severity(16));
   assert.ok(colors.includes("warning"));
   colors.length = 0;
-  bar(95, 5, recording);
+  bar(5, 5, recording, severity(5));
   assert.ok(colors.includes("error"));
 });
 
@@ -1314,13 +1314,11 @@ test("outUntil shows a clock time, then a weekday past 20 hours", () => {
 });
 
 test("formatStatusLine renders the mixed segments on one line", () => {
-  const line = formatStatusLine(mixedSegments, identityPaint, NOW);
-
-  assert.ok(line);
-  assert.ok(line.startsWith("claude 5h ▋░░░░  12% 7d ██▍░░  48% · "), line);
-  assert.ok(line.includes("devin ⏸ "), line);
-  assert.ok(line.endsWith("muse n/a"), line);
-  assert.equal(formatStatusLine([], identityPaint, NOW), undefined);
+  assert.equal(
+    formatStatusLine(mixedSegments, NOW),
+    `Left: 🟢 claude 52% · ⏸ devin 0% until ${outUntil(NOW + 2 * 3_600_000, NOW)} · ⚪ muse n/a`
+  );
+  assert.equal(formatStatusLine([], NOW), undefined);
 });
 
 test("formatAccountRows keeps countdowns wide, drops them narrow, and folds quiet accounts", () => {
@@ -1409,7 +1407,7 @@ test("the current-account marker keeps the segment color in a themed paint", () 
     NOW
   );
 
-  assert.equal(out[0], "<accent>▸</><error>claude ⏸ 10:00</>");
+  assert.equal(out[0], "<dim>left</> <accent>▸</><error>claude ⏸ 10:00</>");
 
   const unknown = formatAccountRows(
     [{ current: true, kind: "unknown", name: "muse" }],
@@ -1418,7 +1416,7 @@ test("the current-account marker keeps the segment color in a themed paint", () 
     NOW
   );
 
-  assert.equal(unknown[0], "<accent>▸</><dim>muse n/a</>");
+  assert.equal(unknown[0], "<dim>left</> <accent>▸</><dim>muse n/a</>");
 });
 
 test("row 1 drops the provider prefix before truncating the model name", () => {

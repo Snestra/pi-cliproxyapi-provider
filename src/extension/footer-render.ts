@@ -29,16 +29,26 @@ const MINUTE_MS = 60_000;
 const HOUR_MS = 60 * MINUTE_MS;
 const DAY_MS = 24 * HOUR_MS;
 
-export const severity = (percent: number): "error" | "warning" | undefined => {
-  if (percent >= 90) {
+const LEFT_INDICATORS = { error: "🔴", warning: "🟡" } as const;
+
+const quotaLeft = (usedPercent: number): number =>
+  Math.round(100 - Math.min(100, Math.max(0, usedPercent)));
+
+export const severity = (left: number): "error" | "warning" | undefined => {
+  if (left <= 10) {
     return "error";
   }
 
-  return percent >= 75 ? "warning" : undefined;
+  return left <= 25 ? "warning" : undefined;
 };
 
 /** A bar of `cells` blocks, filled by rounded eighths, with a dim track. */
-export const bar = (percent: number, cells: number, paint: Paint): string => {
+export const bar = (
+  percent: number,
+  cells: number,
+  paint: Paint,
+  tone?: "error" | "warning"
+): string => {
   const clamped = Math.min(100, Math.max(0, percent));
   const eighths = Math.round((clamped / 100) * cells * EIGHTHS);
   const full = Math.floor(eighths / EIGHTHS);
@@ -48,8 +58,7 @@ export const bar = (percent: number, cells: number, paint: Paint): string => {
     FULL.repeat(full) + (partial > 0 ? (PARTIALS[partial - 1] ?? "") : "");
 
   const track = TRACK.repeat(Math.max(0, cells - full - (partial > 0 ? 1 : 0)));
-  const color = severity(clamped) ?? "syntaxKeyword";
-  const paintedFill = fill ? paint.fg(color, fill) : "";
+  const paintedFill = fill ? paint.fg(tone ?? "syntaxKeyword", fill) : "";
   const paintedTrack = track ? paint.fg("dim", track) : "";
 
   return paintedFill + paintedTrack;
@@ -89,9 +98,9 @@ export const outUntil = (until: number, now: number): string => {
   return new Intl.DateTimeFormat(undefined, options).format(until);
 };
 
-const percentText = (usedPercent: number, paint: Paint): string => {
-  const text = `${Math.round(usedPercent)}%`.padStart(4);
-  const color = severity(usedPercent);
+const percentText = (left: number, paint: Paint): string => {
+  const text = `${left}%`.padStart(4);
+  const color = severity(left);
 
   return color ? paint.fg(color, text) : text;
 };
@@ -129,6 +138,8 @@ const renderSegment = (
   }
 
   const windows = segment.windows.map((window) => {
+    const left = quotaLeft(window.usedPercent);
+
     const reset =
       options.countdowns && window.resetAt !== undefined
         ? countdown(window.resetAt, now)
@@ -136,56 +147,45 @@ const renderSegment = (
 
     const resetText = reset ? ` ${paint.fg("dim", reset)}` : "";
 
-    return `${paint.fg("dim", window.label)} ${bar(window.usedPercent, options.cells, paint)} ${percentText(window.usedPercent, paint)}${resetText}`;
+    return `${paint.fg("dim", window.label)} ${bar(left, options.cells, paint, severity(left))} ${percentText(left, paint)}${resetText}`;
   });
 
   return `${marker}${segment.name} ${windows.join(" ")}`;
 };
 
-const renderPlainSegment = (
-  segment: UsageSegment,
-  paint: Paint,
-  now: number
-): string => {
+const renderPlainSegment = (segment: UsageSegment, now: number): string => {
   if (segment.kind === "model-out") {
-    return paint.fg(
-      "error",
-      `${segment.modelId} ⏸ ${outUntil(segment.until, now)}`
-    );
+    return `⏸ ${segment.modelId} 0% until ${outUntil(segment.until, now)}`;
   }
 
   if (segment.kind === "out") {
-    return paint.fg(
-      "error",
-      `${segment.name} ⏸ ${outUntil(segment.until, now)}`
-    );
+    return `⏸ ${segment.name} 0% until ${outUntil(segment.until, now)}`;
   }
 
   if (segment.kind === "unknown") {
-    return paint.fg("dim", `${segment.name} n/a`);
+    return `⚪ ${segment.name} n/a`;
   }
 
-  const windows = segment.windows.map(
-    (window) =>
-      `${paint.fg("dim", window.label)} ${bar(window.usedPercent, 5, paint)} ${percentText(window.usedPercent, paint)}`
+  const left = Math.min(
+    ...segment.windows.map((window) => quotaLeft(window.usedPercent))
   );
 
-  return `${segment.name} ${windows.join(" ")}`;
+  const color = severity(left);
+  const indicator = color ? LEFT_INDICATORS[color] : "🟢";
+
+  return `${indicator} ${segment.name} ${left}%`;
 };
 
-/** The one-line fallback for users who opt out of the owned footer. No countdowns here. */
+/** Plain text also survives status clients that strip ANSI colors and collapse spaces. */
 export const formatStatusLine = (
   segments: readonly UsageSegment[],
-  paint: Paint,
   now: number
 ): string | undefined => {
   if (segments.length === 0) {
     return undefined;
   }
 
-  return segments
-    .map((segment) => renderPlainSegment(segment, paint, now))
-    .join(paint.fg("dim", " · "));
+  return `Left: ${segments.map((segment) => renderPlainSegment(segment, now)).join(" · ")}`;
 };
 
 const isImportant = (segment: UsageSegment): boolean => {
@@ -197,7 +197,7 @@ const isImportant = (segment: UsageSegment): boolean => {
     return (
       segment.current ||
       segment.windows.some(
-        (window) => severity(window.usedPercent) !== undefined
+        (window) => severity(quotaLeft(window.usedPercent)) !== undefined
       )
     );
   }
@@ -277,10 +277,16 @@ export const formatAccountRows = (
     return elapsed ? [elapsed] : [];
   }
 
-  const renderAll = (options: SegmentOptions): string[] => [
-    ...segments.map((segment) => renderSegment(segment, paint, now, options)),
-    ...(elapsed ? [elapsed] : []),
-  ];
+  const withLabel = (parts: string[]): string[] =>
+    parts.map((part, index) =>
+      index === 0 ? `${paint.fg("dim", "left")} ${part}` : part
+    );
+
+  const renderAll = (options: SegmentOptions): string[] =>
+    withLabel([
+      ...segments.map((segment) => renderSegment(segment, paint, now, options)),
+      ...(elapsed ? [elapsed] : []),
+    ]);
 
   const full = renderAll({ cells: 5, countdowns: true });
 
@@ -322,7 +328,7 @@ export const formatAccountRows = (
       kept.push(paint.fg("dim", `+${folded} more`));
     }
 
-    return kept;
+    return withLabel(kept);
   };
 
   const noUnknown = renderFolded(
@@ -420,5 +426,14 @@ export const contextSegment = (
     colored = paint.fg("warning", display);
   }
 
-  return `${paint.fg("dim", "ctx")} ${bar(percent ?? 0, 10, paint)} ${colored}`;
+  const used = percent ?? 0;
+  let tone: "error" | "warning" | undefined;
+
+  if (used >= 90) {
+    tone = "error";
+  } else if (used >= 75) {
+    tone = "warning";
+  }
+
+  return `${paint.fg("dim", "ctx")} ${bar(used, 10, paint, tone)} ${colored}`;
 };

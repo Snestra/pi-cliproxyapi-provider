@@ -8,7 +8,7 @@ The extension sends each model through the API that suits it. Claude and Kimi mo
 
 - A model list that comes from your CLIProxyAPI server, with the context windows and reasoning levels the server reports, and prices from [models.dev](https://models.dev)
 - A `web_search` tool that runs searches through CLIProxyAPI and estimates what each search cost, when the server reports token usage
-- A footer that shows your accounts' usage windows with bars and reset countdowns, the context window fill, token and cost totals, and the run's elapsed time. Set `"footer": false` to go back to pi's stock footer
+- A footer that shows your accounts' quota left in each window with bars and reset countdowns, the context window fill, token and cost totals, and the run's elapsed time. Set `"footer": false` to go back to pi's stock footer
 - Commands for Fast mode, pausing requests, and adding upstream accounts
 
 ## Requirements
@@ -77,7 +77,7 @@ You can put settings in `~/.pi/agent/cliproxyapi.json`. Every field is optional:
 The fields work as follows:
 
 - `managementKey` is the CLIProxyAPI management key. It turns on the usage footer, `/cliproxyapi-login`, `/cliproxyapi-reset`, and server model definition reloads in `/cliproxyapi-refresh`. You can also set it with the `CLIPROXY_MANAGEMENT_KEY` environment variable. A value that starts with `!` is a shell command, and its output is the key, as with keys in pi's `auth.json`.
-- `footer` turns the custom footer on or off. It defaults to true. Set it to false to restore pi's stock footer, with the account usage shown on one plain line instead.
+- `footer` turns the custom footer on or off. It defaults to true. Set it to false to restore pi's stock footer, with each account's quota left shown on one plain line with status emoji instead.
 - `thinkingDisplay` sets, per model, whether the model sends thought summaries. It applies to models that use the Anthropic Messages API with thinking turned on. The default is `omitted`, because Claude streams its answer only when summaries are off. Set a model to `summarized` to see its summaries.
 - `maxTokens` sets, per model, the most output tokens pi asks for. Use it for models that CLIProxyAPI lists without an output limit, such as API-key upstreams. Those models otherwise get 16,384. pi still trims each request to the context that is left.
 - `imageInput` sets, per model, whether pi may send images. Set a model to `false` when CLIProxyAPI lists image input for a text-only upstream, or to `true` for the reverse.
