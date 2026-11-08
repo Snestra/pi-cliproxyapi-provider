@@ -1,6 +1,7 @@
 {
   "name": "@juvio15/pi-cliproxyapi-provider",
   "version": "0.1.8",
+  "private": true,
   "description": "pi provider for CLIProxyAPI: per-family APIs, model catalog, costs, web search, usage footer",
   "keywords": [
     "cliproxyapi",
@@ -18,13 +19,7 @@
     "type": "git",
     "url": "git+https://github.com/Snestra/pi-cliproxyapi-provider.git"
   },
-  "files": [
-    "src"
-  ],
   "type": "module",
-  "publishConfig": {
-    "access": "public"
-  },
   "scripts": {
     "check": "ultracite check",
     "fix": "ultracite fix",

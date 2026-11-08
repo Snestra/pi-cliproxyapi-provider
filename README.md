@@ -19,11 +19,13 @@ The extension sends each model through the API that suits it. Claude and Kimi mo
 
 ## Install
 
-Install the package with pi:
+Install the package from GitHub with pi:
 
 ```sh
-pi install npm:@juvio15/pi-cliproxyapi-provider
+pi install git:github.com/Snestra/pi-cliproxyapi-provider
 ```
+
+Pi follows the `main` branch and updates the package on `pi update`. The package is not on npm.
 
 Then start pi and run `/login cliproxyapi`. Pi asks for the server address and the API key, and the extension checks them by loading the model list. If you leave the address empty, the extension uses `http://127.0.0.1:8317`, which is the CLIProxyAPI default.
 
