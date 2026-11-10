@@ -4,204 +4,37 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
-import {
-  refreshServerCatalog,
-  resolveConnectionSources,
-  resolveEndpoints,
-  withoutStale,
-} from "../core/index.ts";
-import type { CliproxyModel } from "../core/index.ts";
+import { withoutStale } from "../core/catalog.ts";
+import type { CliproxyModel } from "../core/catalog.ts";
+import { refreshServerCatalog } from "../core/oauth.ts";
 import { completeFrom } from "./completions.ts";
-import {
-  defaultConnectionBaseUrl,
-  isModelReferencedAsDefault,
-  loadAutoCompactEnabled,
-  loadCliproxyConfig,
-  loadStoredConnection,
-  resolveExtensionConnection,
-  resolveIdentity,
-} from "./config.ts";
-import { FastModeController, toggleFastMode } from "./fast.ts";
+import { Settings } from "./config.ts";
+import { errorText } from "./error-text.ts";
+import { FastModeController } from "./fast.ts";
 import { FooterController } from "./footer.ts";
 import { registerOAuthLogin } from "./oauth.ts";
 import { PauseController, registerPause } from "./pause.ts";
 import { PriceCache } from "./prices.ts";
 import { createExtensionProvider } from "./provider.ts";
-import type { ExtensionProviderController } from "./provider.ts";
 import { registerTransientNetworkErrorRetry } from "./retry.ts";
 import { registerStatus } from "./status.ts";
 import type { StatusSnapshot } from "./status.ts";
 import { registerTpsFooter } from "./tps.ts";
-import { MANAGEMENT_KEY_ENV, registerUsage, UsageTracker } from "./usage.ts";
-import type { UsageHandle } from "./usage.ts";
+import { registerUsage, UsageTracker } from "./usage.ts";
 import { pickSearchModel, registerWebSearch } from "./web-search.ts";
-
-const refreshRegistry = async (
-  ctx: ExtensionContext,
-  providerId: string
-): Promise<void> => {
-  const result = await ctx.modelRegistry.refresh({
-    force: true,
-    providers: [providerId],
-  });
-
-  const error = result.errors.get(providerId);
-
-  if (error) {
-    throw error;
-  }
-};
-
-const registerCatalogCommands = (
-  pi: ExtensionAPI,
-  agentDir: string,
-  providerId: string,
-  fast: FastModeController,
-  controller: ExtensionProviderController,
-  footer: FooterController,
-  usage: UsageHandle,
-  tracker: UsageTracker
-): void => {
-  let fastChangePending = false;
-  pi.registerCommand("fast", {
-    description: "Toggle CLIProxyAPI Fast mode globally.",
-    handler: async (args, ctx) => {
-      if (args.trim()) {
-        ctx.ui.notify("Usage: /fast", "error");
-
-        return;
-      }
-
-      if (fastChangePending) {
-        ctx.ui.notify("Fast mode refresh is already running.", "warning");
-
-        return;
-      }
-
-      fastChangePending = true;
-
-      try {
-        const enabled = await toggleFastMode({
-          agentDir,
-          fast,
-          notify: (message, level) => ctx.ui.notify(message, level),
-          refresh: () => refreshRegistry(ctx, providerId),
-        });
-
-        if (enabled === undefined) {
-          footer.refresh(ctx);
-
-          return;
-        }
-
-        const current = ctx.model;
-
-        if (current?.provider === providerId) {
-          const refreshed = ctx.modelRegistry
-            .getAll()
-            .find(
-              (model) =>
-                model.provider === providerId && model.id === current.id
-            );
-
-          if (
-            refreshed &&
-            JSON.stringify(refreshed.cost) !== JSON.stringify(current.cost) &&
-            !(await pi.setModel(refreshed))
-          ) {
-            throw new Error(`Unable to activate refreshed model ${current.id}`);
-          }
-
-          if (enabled && !fast.isModelSupported(current.id)) {
-            ctx.ui.notify(
-              "Fast mode is enabled, but the current model does not support it.",
-              "warning"
-            );
-          }
-        }
-
-        footer.refresh(ctx);
-      } catch (error) {
-        ctx.ui.notify(
-          `Failed to update Fast mode: ${error instanceof Error ? error.message : String(error)}`,
-          "error"
-        );
-      } finally {
-        fastChangePending = false;
-      }
-    },
-  });
-
-  pi.registerCommand("cliproxyapi-refresh", {
-    description: "Force refresh CLIProxyAPI models from the remote catalog.",
-    handler: async (args, ctx) => {
-      if (args.trim()) {
-        ctx.ui.notify("Usage: /cliproxyapi-refresh", "error");
-
-        return;
-      }
-
-      const access = tracker.managementAccess();
-
-      if (access) {
-        try {
-          await refreshServerCatalog({ ...access, signal: ctx.signal });
-        } catch (error) {
-          ctx.ui.notify(
-            `CLIProxyAPI could not reload its model definitions: ${error instanceof Error ? error.message : String(error)}`,
-            "warning"
-          );
-        }
-      }
-
-      try {
-        await refreshRegistry(ctx, providerId);
-        await usage.refresh(ctx);
-        const models = controller.getModels();
-        const stale = models.filter((model) => model.stale).length;
-        ctx.ui.notify(
-          `Refreshed ${models.length - stale} CLIProxyAPI models${stale ? `. Hid ${stale} that CLIProxyAPI no longer lists` : ""}.`,
-          "info"
-        );
-      } catch (error) {
-        ctx.ui.notify(
-          `Failed to refresh CLIProxyAPI models: ${error instanceof Error ? error.message : String(error)}`,
-          "error"
-        );
-      }
-    },
-  });
-};
-
-const OFFLINE_FLAG = /^(?:1|true|yes)$/iu;
 
 export default async function cliproxyapiProvider(
   pi: ExtensionAPI
 ): Promise<void> {
-  const agentDir = getAgentDir();
-  const config = loadCliproxyConfig(agentDir);
-  const { providerId, providerName } = resolveIdentity(agentDir);
+  const settings = new Settings(getAgentDir());
+  const { providerId } = settings;
+  const config = settings.config();
   const fast = new FastModeController(config.fast ?? false);
   const pause = new PauseController(config.pause ?? false);
-
-  const connection = resolveExtensionConnection({
-    agentDir,
-    env: process.env,
-    providerId,
-  });
-
-  const defaultBaseUrl = defaultConnectionBaseUrl(agentDir, providerId);
-
-  const initialConnection =
-    connection ??
-    ({
-      ...resolveEndpoints(defaultBaseUrl),
-      apiKey: "login-required",
-      baseUrl: defaultBaseUrl,
-    } as const);
+  const tracker = new UsageTracker({ settings });
+  const prices = new PriceCache({ agentDir: settings.agentDir });
 
   let activeContext: ExtensionContext | undefined;
-  let latestModels: readonly CliproxyModel[] = [];
   let notifiedStaleModel: string | undefined;
   // A price failure warns once per session, in the UI only. A warning before session_start waits for it.
   let priceWarned = false;
@@ -217,12 +50,15 @@ export default async function cliproxyapiProvider(
     pendingPriceWarning = undefined;
   };
 
-  const notifyStaleModel = (ctx: ExtensionContext): void => {
-    const stale = latestModels.find(
+  const notifyStaleModel = (
+    ctx: ExtensionContext,
+    models: readonly CliproxyModel[]
+  ): void => {
+    const stale = models.find(
       (model) =>
         model.stale &&
         ((ctx.model?.provider === providerId && ctx.model.id === model.id) ||
-          isModelReferencedAsDefault(agentDir, providerId, model.id))
+          settings.isDefaultModel(model.id))
     );
 
     if (!stale) {
@@ -240,21 +76,15 @@ export default async function cliproxyapiProvider(
     }
   };
 
-  const tracker = new UsageTracker({ agentDir, providerId });
-  const prices = new PriceCache({ agentDir });
+  const available = <T extends { id: string }>(models: readonly T[]): T[] =>
+    tracker.filter(withoutStale(models));
 
   const controller = createExtensionProvider({
-    agentDir,
-    config,
-    configured: connection !== null,
-    connection: initialConnection,
     fast,
-    filterAvailable: (models) => tracker.filter(withoutStale(models)),
+    filterAvailable: available,
     onModels: (models) => {
-      latestModels = models;
-
       if (activeContext) {
-        notifyStaleModel(activeContext);
+        notifyStaleModel(activeContext, models);
       }
     },
     onPriceWarning: (message) => {
@@ -269,73 +99,82 @@ export default async function cliproxyapiProvider(
       }
     },
     prices,
-    providerId,
-    providerName,
+    settings,
   });
+
+  const catalogIds = (): string[] =>
+    controller.getModels().map((model) => model.id);
+
+  const startupConnection = settings.connection();
 
   // Print and JSON runs never refresh the catalog, so a cold start must load it before pi resolves --model.
   if (
-    connection &&
+    startupConnection &&
     controller.getModels().length === 0 &&
-    !OFFLINE_FLAG.test(process.env.PI_OFFLINE ?? "")
+    !settings.offline()
   ) {
     try {
-      await controller.refresh(connection);
+      await controller.refresh(startupConnection);
     } catch (error) {
       // Startup has no UI yet, so stderr is the only place this warning can go.
-      console.warn(
-        `[cliproxyapi] Failed to load models: ${error instanceof Error ? error.message : String(error)}`
-      );
+      console.warn(`[cliproxyapi] Failed to load models: ${errorText(error)}`);
     }
   }
 
-  latestModels = controller.getModels();
   pi.registerProvider(controller.provider);
 
+  /** Without network, pi re-derives the models from the cached catalog and the current settings. */
+  const refreshRegistry = async (
+    ctx: ExtensionContext,
+    options: { force?: boolean; allowNetwork?: boolean } = {}
+  ): Promise<void> => {
+    const result = await ctx.modelRegistry.refresh({
+      ...options,
+      providers: [providerId],
+    });
+
+    const error = result.errors.get(providerId);
+
+    if (error) {
+      throw error;
+    }
+  };
+
   const footer = new FooterController(providerId, fast, pause, {
-    agentDir,
-    autoCompact: () => loadAutoCompactEnabled(agentDir),
-    enabled: () => loadCliproxyConfig(agentDir).footer ?? true,
     getSegments: (ctx) =>
       tracker.segments(
-        controller.getModels().map((model) => model.id),
+        catalogIds(),
         ctx.model?.provider === providerId ? ctx.model.id : undefined
       ),
+    settings,
   });
 
   footer.register(pi);
-  registerPause(pi, agentDir, pause);
+  registerPause(pi, settings, pause);
   registerTpsFooter(pi, pause, providerId);
   registerTransientNetworkErrorRetry(pi, providerId);
 
   const usage = registerUsage(pi, {
-    getCatalogIds: () => controller.getModels().map((model) => model.id),
-    providerId,
+    getCatalogIds: catalogIds,
+    reapplyFilter: (ctx) => refreshRegistry(ctx, { allowNetwork: false }),
+    settings,
     tracker,
   });
+
+  const refreshAll = async (ctx: ExtensionContext): Promise<void> => {
+    await refreshRegistry(ctx, { force: true });
+    await usage.refresh(ctx);
+  };
 
   pi.registerCommand("cliproxyapi-reset", {
     description:
       "Reset CLIProxyAPI cooldowns, optionally for one model: /cliproxyapi-reset [model-id].",
-    getArgumentCompletions: (prefix) =>
-      completeFrom(
-        controller.getModels().map((model) => model.id),
-        prefix
-      ),
+    getArgumentCompletions: (prefix) => completeFrom(catalogIds(), prefix),
     handler: async (args, ctx) => {
       const modelId = args.trim();
 
       if (/\s/u.test(modelId)) {
         ctx.ui.notify("Usage: /cliproxyapi-reset [model-id]", "error");
-
-        return;
-      }
-
-      if (!tracker.hasManagementKey()) {
-        ctx.ui.notify(
-          `Cannot reset CLIProxyAPI cooldowns: no management key is configured. Set ${MANAGEMENT_KEY_ENV} in the environment or "managementKey" in cliproxyapi.json, then try again.`,
-          "error"
-        );
 
         return;
       }
@@ -346,7 +185,7 @@ export default async function cliproxyapiProvider(
         affected = await tracker.resetCooldowns(modelId || undefined);
       } catch (error) {
         ctx.ui.notify(
-          `Failed to reset CLIProxyAPI cooldowns: ${error instanceof Error ? error.message : String(error)}`,
+          `Failed to reset CLIProxyAPI cooldowns: ${errorText(error)}`,
           "error"
         );
 
@@ -354,11 +193,10 @@ export default async function cliproxyapiProvider(
       }
 
       try {
-        await usage.refresh(ctx);
-        await refreshRegistry(ctx, providerId);
+        await refreshAll(ctx);
       } catch (error) {
         ctx.ui.notify(
-          `CLIProxyAPI cooldowns were reset, but refreshing models failed: ${error instanceof Error ? error.message : String(error)}`,
+          `CLIProxyAPI cooldowns were reset, but refreshing models failed: ${errorText(error)}`,
           "warning"
         );
       }
@@ -381,64 +219,136 @@ export default async function cliproxyapiProvider(
     },
   });
 
-  registerCatalogCommands(
-    pi,
-    agentDir,
-    providerId,
-    fast,
-    controller,
-    footer,
-    usage,
-    tracker
-  );
-  registerOAuthLogin(pi, {
-    providerId,
-    refresh: async (ctx) => {
-      await refreshRegistry(ctx, providerId);
-      await usage.refresh(ctx);
+  pi.registerCommand("fast", {
+    description: "Toggle CLIProxyAPI Fast mode globally.",
+    handler: async (args, ctx) => {
+      if (args.trim()) {
+        ctx.ui.notify("Usage: /fast", "error");
+
+        return;
+      }
+
+      try {
+        const enabled = fast.toggle(settings);
+        await refreshRegistry(ctx, { allowNetwork: false });
+
+        const current = ctx.model;
+
+        if (current?.provider === providerId) {
+          const refreshed = controller
+            .getModels()
+            .find((model) => model.id === current.id);
+
+          // The session holds its own copy of the model, so new prices need a new model object.
+          if (
+            refreshed &&
+            JSON.stringify(refreshed.cost) !== JSON.stringify(current.cost) &&
+            !(await pi.setModel(refreshed))
+          ) {
+            throw new Error(`Unable to activate refreshed model ${current.id}`);
+          }
+
+          if (enabled && !fast.isModelSupported(current.id)) {
+            ctx.ui.notify(
+              "Fast mode is enabled, but the current model does not support it.",
+              "warning"
+            );
+          }
+        }
+
+        ctx.ui.notify(
+          enabled
+            ? "Fast mode is enabled globally."
+            : "Fast mode is disabled globally.",
+          "info"
+        );
+      } catch (error) {
+        ctx.ui.notify(
+          `Failed to update Fast mode: ${errorText(error)}`,
+          "error"
+        );
+      }
+
+      footer.refresh(ctx);
     },
-    tracker,
-  });
-  registerWebSearch(pi, {
-    agentDir,
-    getAvailableModels: () =>
-      tracker.filter(withoutStale(controller.getModels())),
-    getModels: () => withoutStale(controller.getModels()),
-    getStandardCost: controller.getStandardCost,
-    providerId,
   });
 
-  // Reads the files again on each call, so the status shows edits made by other pi processes.
+  pi.registerCommand("cliproxyapi-refresh", {
+    description: "Force refresh CLIProxyAPI models from the remote catalog.",
+    handler: async (args, ctx) => {
+      if (args.trim()) {
+        ctx.ui.notify("Usage: /cliproxyapi-refresh", "error");
+
+        return;
+      }
+
+      const access = settings.managementAccess();
+
+      if (access) {
+        try {
+          await refreshServerCatalog({ ...access, signal: ctx.signal });
+        } catch (error) {
+          ctx.ui.notify(
+            `CLIProxyAPI could not reload its model definitions: ${errorText(error)}`,
+            "warning"
+          );
+        }
+      }
+
+      try {
+        await refreshAll(ctx);
+        const models = controller.getModels();
+        const stale = models.filter((model) => model.stale).length;
+        ctx.ui.notify(
+          `Refreshed ${models.length - stale} CLIProxyAPI models${stale ? `. Hid ${stale} that CLIProxyAPI no longer lists` : ""}.`,
+          "info"
+        );
+      } catch (error) {
+        ctx.ui.notify(
+          `Failed to refresh CLIProxyAPI models: ${errorText(error)}`,
+          "error"
+        );
+      }
+    },
+  });
+
+  registerOAuthLogin(pi, { refresh: refreshAll, settings });
+
+  const availableModels = (): CliproxyModel[] =>
+    available(controller.getModels());
+
+  registerWebSearch(pi, {
+    getAvailableModels: availableModels,
+    getModels: () => withoutStale(controller.getModels()),
+    getStandardCost: controller.getStandardCost,
+    settings,
+  });
+
   const gatherStatus = (): StatusSnapshot => {
     const now = Date.now();
-    const current = loadCliproxyConfig(agentDir);
+    const current = settings.config();
     const models = controller.getModels();
     const catalogFetchedAt = controller.getCatalogFetchedAt();
     const priceInfo = prices.describe();
     const management = tracker.managementStatus();
-
-    const sources = resolveConnectionSources(
-      process.env,
-      current,
-      loadStoredConnection(agentDir, providerId)
-    );
+    const managed = settings.managementKey();
 
     const searchModel = pickSearchModel({
       getStandardCost: controller.getStandardCost,
-      models: tracker.filter(models),
+      models: availableModels(),
       preferred: current.searchModel,
     });
 
     const ageSince = (time: number): number => Math.max(0, now - time);
 
     return {
-      baseUrl: defaultConnectionBaseUrl(agentDir, providerId),
+      baseUrl: settings.baseUrl(),
       catalogAgeMs:
         catalogFetchedAt > 0 ? ageSince(catalogFetchedAt) : undefined,
       fast: fast.isEnabled(),
       fastModels: models.filter((model) => model.supportsFast).length,
       footer: current.footer ?? true,
-      keySource: sources.apiKey,
+      keySource: settings.sources().apiKey,
       management: management && {
         source: management.source,
         usageAgeMs:
@@ -446,7 +356,8 @@ export default async function cliproxyapiProvider(
             ? undefined
             : ageSince(management.usageFetchedAt),
       },
-      managementError: tracker.managementKeyError(),
+      managementError:
+        managed && "error" in managed ? managed.error : undefined,
       models: models.length,
       paused: current.pause ?? pause.isEnabled(),
       prices:
@@ -466,44 +377,29 @@ export default async function cliproxyapiProvider(
 
   pi.on("session_start", async (_event, ctx) => {
     activeContext = ctx;
-    notifyStaleModel(ctx);
+    notifyStaleModel(ctx, controller.getModels());
     showPriceWarning(ctx);
 
-    const currentConnection = resolveExtensionConnection({
-      agentDir,
-      env: process.env,
-      providerId,
-    });
-
-    if (!currentConnection) {
+    if (!settings.connection()) {
       return;
     }
 
     // Not forced, so a catalog fetched under 10 minutes ago is reused without a request.
     try {
-      const result = await ctx.modelRegistry.refresh({
-        providers: [providerId],
-      });
-
-      const failure = result.errors.get(providerId);
-
-      if (failure) {
-        throw failure;
-      }
+      await refreshRegistry(ctx);
     } catch (error) {
       ctx.ui.notify(
-        `Failed to refresh CLIProxyAPI models: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to refresh CLIProxyAPI models: ${errorText(error)}`,
         "warning"
       );
     }
   });
   pi.on("model_select", (_event, ctx) => {
     activeContext = ctx;
-    notifyStaleModel(ctx);
+    notifyStaleModel(ctx, controller.getModels());
   });
   pi.on("session_shutdown", () => {
     activeContext = undefined;
-    latestModels = [];
     notifiedStaleModel = undefined;
     priceWarned = false;
     pendingPriceWarning = undefined;

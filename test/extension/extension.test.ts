@@ -8,39 +8,27 @@ import { setTimeout } from "node:timers/promises";
 
 import type { StreamOptions } from "@earendil-works/pi-ai";
 import { createModels } from "@earendil-works/pi-ai/models";
-import { visibleWidth } from "@earendil-works/pi-tui";
-import { format } from "oxfmt";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
-import {
-  QUOTA_FALLBACK_MS,
-  matchModelCost,
-  resolveConnectionSources,
-} from "../../src/core/index.ts";
-import type { CatalogModel } from "../../src/core/index.ts";
+import type { CatalogModel } from "../../src/core/catalog.ts";
+import { matchModelCost } from "../../src/core/costs.ts";
+import { QUOTA_FALLBACK_MS } from "../../src/core/usage.ts";
 import { completeFrom } from "../../src/extension/completions.ts";
-import {
-  loadCliproxyConfig,
-  loadStoredConnection,
-  resolveExtensionConnection,
-  saveCliproxyConfig,
-} from "../../src/extension/config.ts";
-import {
-  FastModeController,
-  toggleFastMode,
-} from "../../src/extension/fast.ts";
+import { Settings } from "../../src/extension/config.ts";
+import { FastModeController } from "../../src/extension/fast.ts";
 import {
   bar,
   contextSegment,
   countdown,
   formatAccountRows,
   formatCwd,
+  formatRow1,
   formatStatusLine,
   formatTokens,
   outUntil,
   severity,
 } from "../../src/extension/footer-render.ts";
 import type { Paint, UsageSegment } from "../../src/extension/footer-render.ts";
-import { FooterController } from "../../src/extension/footer.ts";
 import { PriceCache } from "../../src/extension/prices.ts";
 import { createExtensionProvider } from "../../src/extension/provider.ts";
 import { formatStatus } from "../../src/extension/status.ts";
@@ -283,41 +271,20 @@ test("extension connection honors CLIPROXYAPI priority and ignores OPENAI", asyn
     `${JSON.stringify({ apiKey: "file-key", baseUrl: "file.test" }, null, 2)}\n`
   );
 
-  const env = new Proxy(
-    {
-      CLIPROXYAPI_API_KEY: "env-key",
-      CLIPROXYAPI_BASE_URL: "env.test/v1",
-      OPENAI_API_KEY: "must-not-win",
-      OPENAI_BASE_URL: "must-not-win.test",
-    },
-    {
-      get(target, key) {
-        assert.ok(
-          key === "CLIPROXYAPI_API_KEY" || key === "CLIPROXYAPI_BASE_URL"
-        );
-
-        // SAFETY: The assertion above restricts property reads to the two injected CLIProxyAPI keys.
-        return target[key as keyof typeof target];
-      },
-    }
-  );
-
-  const connection = resolveExtensionConnection({
-    agentDir: agentDir.pathname,
-    env,
-    providerId: "cliproxyapi",
-    stored: { apiKey: "stored-key", baseUrl: "stored.test" },
-  });
+  const connection = new Settings(agentDir.pathname, {
+    CLIPROXYAPI_API_KEY: "env-key",
+    CLIPROXYAPI_BASE_URL: "env.test/v1",
+    OPENAI_API_KEY: "must-not-win",
+    OPENAI_BASE_URL: "must-not-win.test",
+  }).connection();
 
   assert.equal(connection?.apiKey, "env-key");
   assert.equal(connection?.rootUrl, "https://env.test");
 
-  const openAiOnly = resolveExtensionConnection({
-    agentDir: agentDir.pathname,
-    env: { OPENAI_API_KEY: "ignored", OPENAI_BASE_URL: "ignored.test" },
-    providerId: "cliproxyapi",
-    stored: {},
-  });
+  const openAiOnly = new Settings(agentDir.pathname, {
+    OPENAI_API_KEY: "ignored",
+    OPENAI_BASE_URL: "ignored.test",
+  }).connection();
 
   assert.equal(openAiOnly?.apiKey, "file-key");
   assert.equal(openAiOnly?.rootUrl, "https://file.test");
@@ -327,7 +294,7 @@ test("extension connection honors CLIPROXYAPI priority and ignores OPENAI", asyn
     `${JSON.stringify({ thinkingDisplay: { "claude-opus-5-5": "full" } }, null, 2)}\n`
   );
   assert.throws(
-    () => loadCliproxyConfig(agentDir.pathname),
+    () => new Settings(agentDir.pathname, {}).config(),
     /Invalid cliproxyapi\.json at \/thinkingDisplay\/claude-opus-5-5/u
   );
 });
@@ -336,10 +303,11 @@ test("saving cliproxyapi.json round-trips and leaves no temp file behind", async
   const agentDir = new URL("save-agent/", outputDirectory);
   await rm(agentDir, { force: true, recursive: true });
 
-  saveCliproxyConfig(agentDir.pathname, { baseUrl: "saved.test", pause: true });
-  saveCliproxyConfig(agentDir.pathname, { searchModel: "gpt-6-luna" });
+  const settings = new Settings(agentDir.pathname, {});
+  settings.save({ baseUrl: "saved.test", pause: true });
+  settings.save({ searchModel: "gpt-6-luna" });
 
-  const saved = loadCliproxyConfig(agentDir.pathname);
+  const saved = settings.config();
   assert.equal(saved.baseUrl, "saved.test");
   assert.equal(saved.pause, true);
   assert.equal(saved.searchModel, "gpt-6-luna");
@@ -349,16 +317,14 @@ test("saving cliproxyapi.json round-trips and leaves no temp file behind", async
 test("a save that cannot serialize keeps the old cliproxyapi.json", async () => {
   const agentDir = new URL("failed-save-agent/", outputDirectory);
   await rm(agentDir, { force: true, recursive: true });
-  saveCliproxyConfig(agentDir.pathname, { baseUrl: "kept.test" });
+  const settings = new Settings(agentDir.pathname, {});
+  settings.save({ baseUrl: "kept.test" });
   const before = await readFile(new URL("cliproxyapi.json", agentDir), "utf-8");
 
   // A BigInt cannot become JSON, so this save fails while serializing.
   const unserializable = { baseUrl: "lost.test", count: 1n };
 
-  assert.throws(
-    () => saveCliproxyConfig(agentDir.pathname, unserializable),
-    TypeError
-  );
+  assert.throws(() => settings.save(unserializable), TypeError);
 
   assert.equal(
     await readFile(new URL("cliproxyapi.json", agentDir), "utf-8"),
@@ -370,12 +336,8 @@ test("a save that cannot serialize keeps the old cliproxyapi.json", async () => 
 test("cliproxyapi.json reads see a write from another pi process", async () => {
   const agentDir = new URL("memo-config-agent/", outputDirectory);
   await rm(agentDir, { force: true, recursive: true });
-  saveCliproxyConfig(agentDir.pathname, { baseUrl: "memo.test", pause: false });
-
-  assert.deepEqual(
-    loadCliproxyConfig(agentDir.pathname),
-    loadCliproxyConfig(agentDir.pathname)
-  );
+  const settings = new Settings(agentDir.pathname, {});
+  settings.save({ baseUrl: "memo.test", pause: false });
 
   // Another pi process rewrites the file in place with /pause.
   await writeFile(
@@ -383,7 +345,7 @@ test("cliproxyapi.json reads see a write from another pi process", async () => {
     `${JSON.stringify({ baseUrl: "memo.test", pause: true }, null, 2)}\n`
   );
 
-  assert.equal(loadCliproxyConfig(agentDir.pathname).pause, true);
+  assert.equal(settings.config().pause, true);
 });
 
 test("a quota mark written by one usage tracker hides the model in another", async () => {
@@ -391,11 +353,7 @@ test("a quota mark written by one usage tracker hides the model in another", asy
   await rm(agentDir, { force: true, recursive: true });
   await mkdir(agentDir, { recursive: true });
 
-  const options = {
-    agentDir: agentDir.pathname,
-    env: {},
-    providerId: "cliproxyapi",
-  };
+  const options = { settings: new Settings(agentDir.pathname, {}) };
 
   const reader = new UsageTracker(options);
   const writer = new UsageTracker(options);
@@ -520,13 +478,11 @@ const usageAgentDir = async (name: string): Promise<URL> => {
 
 const managedTracker = (agentDir: URL, root: string, managementKey: string) =>
   new UsageTracker({
-    agentDir: agentDir.pathname,
-    env: {
+    settings: new Settings(agentDir.pathname, {
       CLIPROXYAPI_API_KEY: "usage-test-key",
       CLIPROXYAPI_BASE_URL: root,
       CLIPROXY_MANAGEMENT_KEY: managementKey,
-    },
-    providerId: "cliproxyapi",
+    }),
   });
 
 const exhaustedMarks = async (agentDir: URL): Promise<Record<string, number>> =>
@@ -621,9 +577,7 @@ test("Claude's account rate limit 429 without a management key marks the model o
   await mkdir(agentDir, { recursive: true });
 
   const tracker = new UsageTracker({
-    agentDir: agentDir.pathname,
-    env: {},
-    providerId: "cliproxyapi",
+    settings: new Settings(agentDir.pathname, {}),
   });
 
   const before = Date.now();
@@ -653,25 +607,20 @@ test("registered family APIs, configured thought summaries, and live Fast tier w
     )}\n`
   );
 
-  const connection = resolveExtensionConnection({
-    agentDir: agentDir.pathname,
-    env: {
-      CLIPROXYAPI_API_KEY: "extension-test-key",
-      CLIPROXYAPI_BASE_URL: proxy.root,
-    },
-    providerId: "cliproxyapi",
+  const settings = new Settings(agentDir.pathname, {
+    CLIPROXYAPI_API_KEY: "extension-test-key",
+    CLIPROXYAPI_BASE_URL: proxy.root,
   });
 
-  assert.ok(connection);
   const fast = new FastModeController(false);
 
   const extensionProvider = createExtensionProvider({
-    agentDir: agentDir.pathname,
-    connection,
-    costsUrl: `${proxy.root}/costs`,
     fast,
-    providerId: "cliproxyapi",
-    providerName: "CLIProxyAPI",
+    prices: new PriceCache({
+      agentDir: agentDir.pathname,
+      costsUrl: `${proxy.root}/costs`,
+    }),
+    settings,
   });
 
   const models = createModels();
@@ -696,31 +645,22 @@ test("registered family APIs, configured thought summaries, and live Fast tier w
   assert.equal(claudeResult.stopReason, "stop", claudeResult.errorMessage);
   assert.equal(proxy.requests.at(-1)?.body.thinking?.display, "summarized");
 
-  const originalProvider = models.getProvider("cliproxyapi");
-  const originalModel = models.getModel("cliproxyapi", "gpt-6-luna");
   const standard = await models.completeSimple(gpt, context);
   assert.equal(standard.stopReason, "stop", standard.errorMessage);
   assert.equal(proxy.requests.at(-1)?.body.service_tier, undefined);
 
-  const notifications: string[] = [];
+  const catalogRequests = proxy.requests.length;
+  assert.equal(fast.toggle(settings), true);
 
-  const toggled = await toggleFastMode({
-    agentDir: agentDir.pathname,
-    fast,
-    notify: (message) => notifications.push(message),
-    refresh: async () => {
-      const result = await models.refresh({
-        force: true,
-        providers: ["cliproxyapi"],
-      });
-
-      assert.equal(result.errors.size, 0);
-    },
+  const offline = await models.refresh({
+    allowNetwork: false,
+    providers: ["cliproxyapi"],
   });
 
-  assert.equal(toggled, true);
-  assert.ok(notifications.some((message) => message.includes("enabled")));
+  assert.equal(offline.errors.size, 0);
+  assert.equal(settings.config().fast, true);
   assert.equal(models.getModel("cliproxyapi", "gpt-6-luna")?.cost.input, 4);
+  assert.equal(proxy.requests.length, catalogRequests);
 
   const priority = await models.completeSimple(gpt, context, {
     onPayload: expectPriorityThenTag,
@@ -731,11 +671,6 @@ test("registered family APIs, configured thought summaries, and live Fast tier w
   assert.deepEqual(proxy.requests.at(-1)?.body.metadata, {
     caller: "final-hook",
   });
-  assert.equal(models.getProvider("cliproxyapi"), originalProvider);
-  assert.equal(
-    models.getModel("cliproxyapi", "gpt-6-luna")?.id,
-    originalModel?.id
-  );
 
   await mkdir(outputDirectory, { recursive: true });
   await writeFile(
@@ -743,14 +678,24 @@ test("registered family APIs, configured thought summaries, and live Fast tier w
     `${JSON.stringify(proxy.requests, null, 2)}\n`
   );
 
-  const cacheUrl = new URL("cliproxyapi-provider-models.json", agentDir);
-  const cacheText = await readFile(cacheUrl, "utf-8");
-  const cache = JSON.parse(cacheText);
+  // The next pi process starts with the catalog before any request.
+  const requestsBeforeRestart = proxy.requests.length;
 
-  assert.equal(cache.models.length, 2);
-  const formattedCache = await format(cacheUrl.pathname, cacheText);
-  assert.deepEqual(formattedCache.errors, []);
-  await writeFile(cacheUrl, formattedCache.code);
+  const restarted = createExtensionProvider({
+    fast,
+    prices: new PriceCache({
+      agentDir: agentDir.pathname,
+      costsUrl: `${proxy.root}/costs`,
+    }),
+    settings,
+  });
+
+  assert.deepEqual(
+    restarted.getModels().map((model) => model.id),
+    ["claude-haiku-5-5", "gpt-6-luna"]
+  );
+  assert.equal(restarted.getModels()[1]?.cost.input, 4);
+  assert.equal(proxy.requests.length, requestsBeforeRestart);
 });
 
 test("the first price load fetches models.dev once and saves only the catalog's prices", async (t) => {
@@ -854,29 +799,27 @@ test("a models.dev outage with no cached prices zeroes costs and says so", async
   const agentDir = new URL("prices-none-agent/", outputDirectory);
   await rm(agentDir, { force: true, recursive: true });
 
-  const connection = resolveExtensionConnection({
-    agentDir: agentDir.pathname,
-    env: {
-      CLIPROXYAPI_API_KEY: "extension-test-key",
-      CLIPROXYAPI_BASE_URL: proxy.root,
-    },
-    providerId: "cliproxyapi",
+  const settings = new Settings(agentDir.pathname, {
+    CLIPROXYAPI_API_KEY: "extension-test-key",
+    CLIPROXYAPI_BASE_URL: proxy.root,
   });
 
+  const connection = settings.connection();
   assert.ok(connection);
   const warnings: string[] = [];
 
   const extensionProvider = createExtensionProvider({
-    agentDir: agentDir.pathname,
-    connection,
-    costsUrl: `${proxy.root}/costs`,
     fast: new FastModeController(false),
     onPriceWarning: (message) => warnings.push(message),
-    providerId: "cliproxyapi",
-    providerName: "CLIProxyAPI",
+    prices: new PriceCache({
+      agentDir: agentDir.pathname,
+      costsUrl: `${proxy.root}/costs`,
+    }),
+    settings,
   });
 
-  const [claude, gpt] = await extensionProvider.refresh(connection);
+  await extensionProvider.refresh(connection);
+  const [claude, gpt] = extensionProvider.getModels();
   const zero = { cacheRead: 0, cacheWrite: 0, input: 0, output: 0 };
 
   assert.deepEqual(claude?.cost, zero);
@@ -899,25 +842,17 @@ const startCatalogRefresh = async (
   await rm(agentDir, { force: true, recursive: true });
   const clock = { now: Date.parse("2026-10-29T12:00:00Z") };
 
-  const connection = resolveExtensionConnection({
-    agentDir: agentDir.pathname,
-    env: {
-      CLIPROXYAPI_API_KEY: "extension-test-key",
-      CLIPROXYAPI_BASE_URL: proxy.root,
-    },
-    providerId: "cliproxyapi",
-  });
-
-  assert.ok(connection);
-
   const extensionProvider = createExtensionProvider({
-    agentDir: agentDir.pathname,
-    connection,
-    costsUrl: `${proxy.root}/costs`,
     fast: new FastModeController(false),
     now: () => clock.now,
-    providerId: "cliproxyapi",
-    providerName: "CLIProxyAPI",
+    prices: new PriceCache({
+      agentDir: agentDir.pathname,
+      costsUrl: `${proxy.root}/costs`,
+    }),
+    settings: new Settings(agentDir.pathname, {
+      CLIPROXYAPI_API_KEY: "extension-test-key",
+      CLIPROXYAPI_BASE_URL: proxy.root,
+    }),
   });
 
   const models = createModels();
@@ -980,24 +915,16 @@ test("a refresh gives Claude models pi's prompt cache lifetimes", async (t) => {
   const agentDir = new URL("prompt-cache-agent/", outputDirectory);
   await rm(agentDir, { force: true, recursive: true });
 
-  const connection = resolveExtensionConnection({
-    agentDir: agentDir.pathname,
-    env: {
+  const extensionProvider = createExtensionProvider({
+    fast: new FastModeController(false),
+    prices: new PriceCache({
+      agentDir: agentDir.pathname,
+      costsUrl: `${proxy.root}/costs`,
+    }),
+    settings: new Settings(agentDir.pathname, {
       CLIPROXYAPI_API_KEY: "prompt-cache-key",
       CLIPROXYAPI_BASE_URL: proxy.root,
-    },
-    providerId: "cliproxyapi",
-  });
-
-  assert.ok(connection);
-
-  const extensionProvider = createExtensionProvider({
-    agentDir: agentDir.pathname,
-    connection,
-    costsUrl: `${proxy.root}/costs`,
-    fast: new FastModeController(false),
-    providerId: "cliproxyapi",
-    providerName: "CLIProxyAPI",
+    }),
   });
 
   const models = createModels();
@@ -1076,30 +1003,26 @@ test("formatStatus without an API key or management key says so", () => {
 test("the status never shows the API key or the management key", async () => {
   const agentDir = new URL("status-agent/", outputDirectory);
   await rm(agentDir, { force: true, recursive: true });
-  saveCliproxyConfig(agentDir.pathname, {
+  const fileSettings = new Settings(agentDir.pathname, {});
+  fileSettings.save({
     apiKey: "SENTINEL-FILE-API-KEY",
     managementKey: "SENTINEL-FILE-MANAGEMENT-KEY",
     searchModel: "gpt-6-luna",
   });
-  const config = loadCliproxyConfig(agentDir.pathname);
-  const stored = loadStoredConnection(agentDir.pathname, "cliproxyapi");
+  const config = fileSettings.config();
 
-  const envOptions = {
-    agentDir: agentDir.pathname,
-    env: {
-      CLIPROXYAPI_API_KEY: "SENTINEL-ENV-API-KEY",
-      CLIPROXY_MANAGEMENT_KEY: "SENTINEL-ENV-MANAGEMENT-KEY",
-    },
-    providerId: "cliproxyapi",
-  };
+  const envSettings = new Settings(agentDir.pathname, {
+    CLIPROXYAPI_API_KEY: "SENTINEL-ENV-API-KEY",
+    CLIPROXY_MANAGEMENT_KEY: "SENTINEL-ENV-MANAGEMENT-KEY",
+  });
 
   const fromEnv = formatStatus({
     baseUrl: "http://127.0.0.1:8317",
     fast: false,
     fastModels: 0,
     footer: true,
-    keySource: resolveConnectionSources(envOptions.env, config, stored).apiKey,
-    management: new UsageTracker(envOptions).managementStatus(),
+    keySource: envSettings.sources().apiKey,
+    management: new UsageTracker({ settings: envSettings }).managementStatus(),
     models: 0,
     paused: false,
     searchModel: { configured: config.searchModel },
@@ -1112,12 +1035,8 @@ test("the status never shows the API key or the management key", async () => {
     fast: false,
     fastModels: 0,
     footer: true,
-    keySource: resolveConnectionSources({}, config, stored).apiKey,
-    management: new UsageTracker({
-      agentDir: agentDir.pathname,
-      env: {},
-      providerId: "cliproxyapi",
-    }).managementStatus(),
+    keySource: fileSettings.sources().apiKey,
+    management: new UsageTracker({ settings: fileSettings }).managementStatus(),
     models: 0,
     paused: false,
     searchModel: { configured: config.searchModel },
@@ -1180,7 +1099,6 @@ test("formatTpsSummary without any input shows no cache hit rate", () => {
 });
 
 const identityPaint: Paint = {
-  bold: (text) => text,
   fg: (_color, text) => text,
 };
 
@@ -1238,9 +1156,7 @@ test("segments covers windows, out with the earliest return, unknown, skipped, a
   );
 
   const tracker = new UsageTracker({
-    agentDir: agentDir.pathname,
-    env: {},
-    providerId: "cliproxyapi",
+    settings: new Settings(agentDir.pathname, {}),
   });
 
   const segments = tracker.segments(
@@ -1282,7 +1198,6 @@ test("severity and bar colors follow the 25 and 10 percent left thresholds", () 
   const colors: string[] = [];
 
   const recording: Paint = {
-    bold: (text) => text,
     fg: (color, text) => {
       colors.push(color);
 
@@ -1396,7 +1311,6 @@ test("formatAccountRows keeps countdowns wide, drops them narrow, and folds quie
 
 test("the current-account marker keeps the segment color in a themed paint", () => {
   const themed: Paint = {
-    bold: (text) => text,
     fg: (color, text) => `<${color}>${text}</>`,
   };
 
@@ -1407,7 +1321,10 @@ test("the current-account marker keeps the segment color in a themed paint", () 
     NOW
   );
 
-  assert.equal(out[0], "<dim>left</> <accent>▸</><error>claude ⏸ 10:00</>");
+  assert.equal(
+    out[0],
+    `<dim>left</> <accent>▸</><error>claude ⏸ ${outUntil(NOW + 3_600_000, NOW)}</>`
+  );
 
   const unknown = formatAccountRows(
     [{ current: true, kind: "unknown", name: "muse" }],
@@ -1424,14 +1341,15 @@ test("row 1 drops the provider prefix before truncating the model name", () => {
   const bare = "gpt-6.1-sol • medium";
   const context = contextSegment(0, 500_000, true, identityPaint);
 
-  const row = FooterController.assembleRow1(
+  const row = formatRow1(
     "~/proj",
     [],
     context,
     right,
     bare,
     identityPaint,
-    50
+    50,
+    (text, available) => truncateToWidth(text, available, "")
   );
 
   assert.ok(!row.includes("cliproxyapi"), row);

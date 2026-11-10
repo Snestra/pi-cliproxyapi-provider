@@ -6,271 +6,175 @@ import type {
   ProviderAuthInteraction,
   RefreshModelsContext,
 } from "@earendil-works/pi-ai";
+import { createProvider } from "@earendil-works/pi-ai/models";
 
 import {
-  applyAnthropicSettings,
-  createCliproxyProvider,
+  catalogId,
   fetchCatalog,
   mapCatalog,
-  matchModelCost,
   mergeCatalog,
-  resolveEndpoints,
-  withImageInput,
-} from "../core/index.ts";
+} from "../core/catalog.ts";
 import type {
   CliproxyApi,
   CliproxyModel,
-  CostCatalog,
-  ResolvedConnection,
-} from "../core/index.ts";
+  TrackedEntry,
+} from "../core/catalog.ts";
+import { connectionTo, resolveEndpoints } from "../core/connection.ts";
+import type { ResolvedConnection } from "../core/connection.ts";
+import { costCatalogFromPrices, matchModelCost } from "../core/costs.ts";
+import type { CostCatalog } from "../core/costs.ts";
+import { cliproxyApis } from "../core/provider.ts";
 import { anthropicCompat, anthropicPromptCache } from "./anthropic-builtins.ts";
-import {
-  buildOAuthCredentials,
-  CREDENTIAL_TTL_MS,
-  decodeRefreshMeta,
-  defaultConnectionBaseUrl,
-  loadCliproxyConfig,
-  loadModelsCache,
-  resolveExtensionConnection,
-  saveCliproxyConfig,
-  saveModelsCache,
-} from "./config.ts";
-import type { CliproxyConfig } from "./config.ts";
+import { loginCredentials, loginExpiry } from "./config.ts";
+import type { Settings } from "./config.ts";
+import { errorText } from "./error-text.ts";
 import type { FastModeController } from "./fast.ts";
-import { PriceCache } from "./prices.ts";
+import type { PriceCache } from "./prices.ts";
 
 export interface ExtensionProviderOptions {
-  agentDir: string;
-  connection: ResolvedConnection;
-  providerId: string;
-  providerName: string;
+  settings: Settings;
   fast: FastModeController;
-  config?: CliproxyConfig;
-  /** Used by the default price cache when `prices` is not given. */
-  costsUrl?: string;
-  fetchFn?: typeof fetch;
-  /** Shared with the status command. Defaults to a cache in agentDir that uses costsUrl and fetchFn. */
-  prices?: PriceCache;
+  prices: PriceCache;
   /** Called with a ready-to-show message when models.dev prices could not be loaded. */
   onPriceWarning?: (message: string) => void;
   onModels?: (models: readonly CliproxyModel[]) => void;
   /** Drops models that are out of quota from pi's available list. getModels keeps them so sessions can still resolve them. */
   filterAvailable?: <T extends { id: string }>(models: readonly T[]) => T[];
-  /** False for the empty provider registered solely to expose /login. */
-  configured?: boolean;
-  /** Clock for the catalog freshness check. Tests inject it. */
   now?: () => number;
 }
 
 export interface ExtensionProviderController {
   provider: Provider<CliproxyApi>;
   getModels: () => readonly CliproxyModel[];
-  getStandardCost: (modelId: string) => ModelCost | undefined;
-  /** When the catalog was last fetched, or 0 when it never was. */
+  getStandardCost: (modelId: string) => ModelCost;
   getCatalogFetchedAt: () => number;
-  refresh: (
-    connection?: ResolvedConnection
-  ) => Promise<readonly CliproxyModel[]>;
+  refresh: (connection: ResolvedConnection) => Promise<void>;
 }
 
-/** A non-forced refresh skips the network while the catalog is younger than this. */
 const CATALOG_TTL_MS = 10 * 60_000;
 
 interface RemoteCatalog {
+  baseUrl: string;
   costs: CostCatalog;
-  fastModelIds: string[];
-  models: CliproxyModel[];
+  entries: TrackedEntry[];
 }
 
-const oauthConnection = (
-  credential: OAuthCredential,
-  fallback: ResolvedConnection
-): ResolvedConnection => {
-  const stored = decodeRefreshMeta(credential.refresh);
-
-  return {
-    ...resolveEndpoints(stored.baseUrl ?? fallback.baseUrl),
-    apiKey: credential.access,
-    baseUrl: stored.baseUrl ?? fallback.baseUrl,
-  };
-};
-
-const builtins = {
-  anthropicCompat,
-  promptCache: anthropicPromptCache,
-};
-
+/**
+ * The provider pi registers. It keeps the catalog as fetched and derives the
+ * models from it with the current settings, so /fast and config edits apply
+ * without a network request.
+ */
 export const createExtensionProvider = (
   options: ExtensionProviderOptions
 ): ExtensionProviderController => {
-  const config = options.config ?? loadCliproxyConfig(options.agentDir);
-
-  const cached = loadModelsCache(
-    options.agentDir,
-    options.connection.baseUrl,
-    options.fast.isEnabled()
-  );
-
-  // Cached Claude models may predate the current compat and promptCache, so they get them here.
-  let currentModels: CliproxyModel[] = (cached?.models ?? []).map((model) => {
-    const loaded: CliproxyModel = {
-      ...model,
-      input: withImageInput(model.input, config.imageInput?.[model.id]),
-      maxTokens: config.maxTokens?.[model.id] ?? model.maxTokens,
-      thoughtSummary: config.thinkingDisplay?.[model.id] ?? "omitted",
-    };
-
-    if (model.api === "anthropic-messages") {
-      applyAnthropicSettings(loaded, builtins);
-    }
-
-    return loaded;
-  });
-
-  let currentCosts: CostCatalog | undefined;
+  const { fast, prices, settings } = options;
   const now = options.now ?? Date.now;
+  const cached = settings.modelsCache(settings.baseUrl());
+  let baseUrl = cached?.baseUrl ?? settings.baseUrl();
+  let entries: TrackedEntry[] = cached?.entries ?? [];
   let catalogFetchedAt = cached?.fetchedAt ?? 0;
+  let costs = prices.cached() ?? costCatalogFromPrices({});
+  let models: CliproxyModel[] = [];
 
-  const prices =
-    options.prices ??
-    new PriceCache({
-      agentDir: options.agentDir,
-      costsUrl: options.costsUrl,
-      fetchFn: options.fetchFn,
+  const derive = (): void => {
+    const config = settings.config();
+
+    models = mapCatalog(entries, {
+      anthropicCompat,
+      baseUrl,
+      costs,
+      fast: fast.isEnabled,
+      imageInput: config.imageInput,
+      maxTokens: config.maxTokens,
+      promptCache: anthropicPromptCache,
+      providerId: settings.providerId,
+      thoughtSummaries: config.thinkingDisplay,
     });
+    fast.setSupportedModelIds(
+      models.flatMap((model) => (model.supportsFast ? [model.id] : []))
+    );
+    options.onModels?.(models);
+  };
 
-  if (cached) {
-    options.fast.setSupportedModelIds(cached.fastModelIds);
-  }
-
-  const core = createCliproxyProvider({
-    apiKey: options.connection.apiKey,
-    baseUrl: options.connection.baseUrl,
-    costsUrl: options.costsUrl,
-    fast: options.fast.isEnabled,
-    fetch: options.fetchFn,
-    imageInput: config.imageInput,
-    maxTokens: config.maxTokens,
-    models: currentModels,
-    ...builtins,
-    providerId: options.providerId,
-    providerName: options.providerName,
-    thoughtSummaries: config.thinkingDisplay,
-  });
+  derive();
 
   const fetchRemote = async (
     connection: ResolvedConnection,
     signal?: AbortSignal
   ): Promise<RemoteCatalog> => {
-    const entries = await fetchCatalog({
+    const fetched = await fetchCatalog({
       apiKey: connection.apiKey,
       baseUrl: connection.baseUrl,
-      fetch: options.fetchFn,
       signal,
     });
 
-    // Prices are kept per catalog id, so the ids come from the same mapping the models do.
-    const ids = mapCatalog(entries, { baseUrl: connection.baseUrl }).models.map(
-      (model) => model.id
+    const tracked = mergeCatalog(
+      baseUrl === connection.baseUrl ? entries : [],
+      fetched.flatMap((entry) => {
+        const id = catalogId(entry);
+
+        return id ? [{ ...entry, id }] : [];
+      })
     );
 
-    const { catalog: costs, warning } = await prices.load(ids, signal);
+    const loaded = await prices.load(
+      tracked.map((entry) => entry.id),
+      signal
+    );
 
-    if (warning) {
-      options.onPriceWarning?.(warning);
+    if (loaded.warning) {
+      options.onPriceWarning?.(loaded.warning);
     }
 
-    const mapped = mapCatalog(entries, {
-      baseUrl: connection.baseUrl,
-      costs,
-      fast: options.fast.isEnabled,
-      imageInput: config.imageInput,
-      maxTokens: config.maxTokens,
-      ...builtins,
-      providerId: options.providerId,
-      thoughtSummaries: config.thinkingDisplay,
-    });
-
     return {
-      costs,
-      fastModelIds: mapped.fastModelIds,
-      models: mergeCatalog(currentModels, mapped.models),
+      baseUrl: connection.baseUrl,
+      costs: loaded.catalog,
+      entries: tracked,
     };
   };
 
-  const commit = (
-    connection: ResolvedConnection,
-    remote: RemoteCatalog
-  ): readonly CliproxyModel[] => {
+  const commit = (remote: RemoteCatalog): void => {
+    ({ baseUrl, costs, entries } = remote);
     catalogFetchedAt = now();
-    currentModels = remote.models;
-    currentCosts = remote.costs;
-    options.fast.setSupportedModelIds(remote.fastModelIds);
-    saveModelsCache(options.agentDir, {
-      baseUrl: connection.baseUrl,
-      fast: options.fast.isEnabled(),
-      fastModelIds: remote.fastModelIds,
-      fetchedAt: catalogFetchedAt,
-      models: currentModels,
-    });
-    options.onModels?.(currentModels);
-
-    return currentModels;
+    settings.saveModelsCache({ baseUrl, entries, fetchedAt: catalogFetchedAt });
+    derive();
   };
 
-  const refresh = async (
-    connection = resolveExtensionConnection({
-      agentDir: options.agentDir,
-      env: process.env,
-      providerId: options.providerId,
-    }) ?? options.connection
-  ): Promise<readonly CliproxyModel[]> =>
-    commit(connection, await fetchRemote(connection));
+  const refresh = async (connection: ResolvedConnection): Promise<void> => {
+    commit(await fetchRemote(connection));
+  };
 
   const refreshModels = async (
     context: RefreshModelsContext
   ): Promise<void> => {
     if (!context.allowNetwork) {
+      await context.publish({ update: derive });
+
       return;
     }
 
-    if (!context.force && now() - catalogFetchedAt < CATALOG_TTL_MS) {
+    const connection = settings.connectionFor(context.credential);
+
+    if (!connection) {
       return;
     }
 
-    let connection: ResolvedConnection;
+    const fresh =
+      baseUrl === connection.baseUrl &&
+      now() - catalogFetchedAt < CATALOG_TTL_MS;
 
-    if (context.credential?.type === "oauth") {
-      connection = oauthConnection(context.credential, options.connection);
-    } else if (context.credential?.type === "api_key") {
-      connection = {
-        ...options.connection,
-        apiKey: context.credential.key ?? options.connection.apiKey,
-      };
-    } else {
-      connection =
-        resolveExtensionConnection({
-          agentDir: options.agentDir,
-          env: process.env,
-          providerId: options.providerId,
-        }) ?? options.connection;
+    if (!context.force && fresh) {
+      return;
     }
 
     const remote = await fetchRemote(connection, context.signal);
-    await context.publish({
-      update: () => {
-        commit(connection, remote);
-      },
-    });
+    await context.publish({ update: () => commit(remote) });
   };
 
   const login = async (
     interaction: ProviderAuthInteraction
   ): Promise<OAuthCredential> => {
-    let baseUrl = defaultConnectionBaseUrl(
-      options.agentDir,
-      options.providerId
-    );
+    let loginBaseUrl = settings.baseUrl();
 
     while (true) {
       interaction.notify({
@@ -280,13 +184,13 @@ export const createExtensionProvider = (
       });
 
       const enteredBaseUrl = await interaction.prompt({
-        message: `CLIProxyAPI base URL [${baseUrl}]:`,
-        placeholder: baseUrl,
+        message: `CLIProxyAPI base URL [${loginBaseUrl}]:`,
+        placeholder: loginBaseUrl,
         type: "text",
       });
 
-      baseUrl = enteredBaseUrl.trim() || baseUrl;
-      resolveEndpoints(baseUrl);
+      loginBaseUrl = enteredBaseUrl.trim() || loginBaseUrl;
+      resolveEndpoints(loginBaseUrl);
 
       const enteredApiKey = await interaction.prompt({
         message: "CLIProxyAPI API key:",
@@ -300,94 +204,79 @@ export const createExtensionProvider = (
         throw new Error("API key cannot be empty.");
       }
 
-      const connection = {
-        ...resolveEndpoints(baseUrl),
-        apiKey,
-        baseUrl,
-      };
-
       try {
         interaction.notify({
           message: "Validating credentials via the models endpoint...",
           type: "progress",
         });
-        await refresh(connection);
+        await refresh(connectionTo(loginBaseUrl, apiKey));
         // pi keeps the key and address in auth.json. The file outranks the
         // login, so values left there would hide this login.
-        saveCliproxyConfig(options.agentDir, {
+        settings.save({
           apiKey: undefined,
           baseUrl: undefined,
-          providerId: options.providerId,
-          providerName: options.providerName,
+          providerId: settings.providerId,
+          providerName: settings.providerName,
         });
 
-        return { ...buildOAuthCredentials(baseUrl, apiKey), type: "oauth" };
+        return { ...loginCredentials(loginBaseUrl, apiKey), type: "oauth" };
       } catch (error) {
         interaction.signal.throwIfAborted();
         interaction.notify({
-          message: `Login validation failed: ${error instanceof Error ? error.message : String(error)}. Please re-enter the connection.`,
+          message: `Login validation failed: ${errorText(error)}. Please re-enter the connection.`,
           type: "progress",
         });
       }
     }
   };
 
-  const provider: Provider<CliproxyApi> = {
-    ...core,
+  const base = createProvider<CliproxyApi>({
+    api: cliproxyApis({ fast: fast.isEnabled }),
     auth: {
       apiKey: {
         name: "CLIProxyAPI environment or configuration",
         resolve: ({ credential }) => {
-          const connection = credential?.key
-            ? { ...options.connection, apiKey: credential.key }
-            : (resolveExtensionConnection({
-                agentDir: options.agentDir,
-                env: process.env,
-                providerId: options.providerId,
-              }) ?? options.connection);
+          const connection = settings.connectionFor(credential);
 
-          if (options.configured === false) {
-            return Promise.resolve(undefined);
-          }
-
-          return Promise.resolve({
-            auth: { apiKey: connection.apiKey },
-            source: "CLIPROXYAPI_API_KEY or cliproxyapi.json",
-          });
+          return Promise.resolve(
+            connection
+              ? {
+                  auth: { apiKey: connection.apiKey },
+                  source: "CLIPROXYAPI_API_KEY or cliproxyapi.json",
+                }
+              : undefined
+          );
         },
       },
       oauth: {
         login,
-        name: options.providerName,
+        name: settings.providerName,
         refresh: (credential) =>
           Promise.resolve({
             ...credential,
-            expires: Date.now() + CREDENTIAL_TTL_MS,
+            expires: loginExpiry(),
           }),
         toAuth: (credential) => Promise.resolve({ apiKey: credential.access }),
       },
     },
-    filterModels: (models) => options.filterAvailable?.(models) ?? models,
-    // core's own getAllModels returns its startup baseline, so it must follow currentModels too.
-    getAllModels: () => currentModels,
-    getModels: () => currentModels,
+    baseUrl: resolveEndpoints(baseUrl).rootUrl,
+    id: settings.providerId,
+    models: [],
+    name: settings.providerName,
+  });
+
+  const provider: Provider<CliproxyApi> = {
+    ...base,
+    filterModels: (list) => options.filterAvailable?.(list) ?? list,
+    getAllModels: () => models,
+    getModels: () => models,
     refreshModels,
   };
 
   return {
     getCatalogFetchedAt: () => catalogFetchedAt,
-    getModels: () => currentModels,
-    getStandardCost: (modelId) => {
-      const costs = currentCosts ?? prices.cached();
-
-      if (costs) {
-        return matchModelCost(modelId, costs);
-      }
-
-      return options.fast.isEnabled()
-        ? undefined
-        : currentModels.find((model) => model.id === modelId)?.cost;
-    },
+    getModels: () => models,
+    getStandardCost: (modelId) => matchModelCost(modelId, costs),
     provider,
     refresh,
   };

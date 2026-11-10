@@ -1,6 +1,6 @@
 // Check 1: the live catalog loads, each family gets its API, and models.dev prices reach the models.
-import { fetchCatalog, selectModelApi } from "../../src/core/index.ts";
-import type { CliproxyModel } from "../../src/core/index.ts";
+import { fetchCatalog, selectModelApi } from "../../src/core/catalog.ts";
+import type { CliproxyModel } from "../../src/core/catalog.ts";
 import { createCheck, liveConnection, liveModels, saveOutput } from "./live.ts";
 
 const check = createCheck("catalog");

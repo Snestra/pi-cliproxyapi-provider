@@ -5,24 +5,22 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import type { CliproxyModel } from "../core/index.ts";
-import { runWebSearch, selectSearchModel } from "../web-search/index.ts";
-import type { WebSearchSource } from "../web-search/index.ts";
+import type { CliproxyModel } from "../core/catalog.ts";
+import { canSearch, selectSearchModel } from "../web-search/model-selector.ts";
+import { runWebSearch } from "../web-search/search.ts";
+import type { WebSearchSource } from "../web-search/search.ts";
 import { completeFrom } from "./completions.ts";
-import {
-  loadCliproxyConfig,
-  resolveExtensionConnection,
-  saveCliproxyConfig,
-} from "./config.ts";
+import type { Settings } from "./config.ts";
+import { errorText } from "./error-text.ts";
 
-export const WebSearchParameters = Type.Object({
+const WebSearchParameters = Type.Object({
   query: Type.String({
     description: "The web search query keywords or question to look up online",
     minLength: 1,
   }),
 });
 
-export const WebSearchOutputSchema = Type.Object({
+const WebSearchOutputSchema = Type.Object({
   query: Type.String({ description: "The trimmed search query" }),
   sources: Type.Array(
     Type.Object({
@@ -51,37 +49,31 @@ export interface WebSearchDetails {
 }
 
 export interface RegisterWebSearchOptions {
-  agentDir: string;
-  providerId: string;
+  settings: Settings;
   getModels: () => readonly CliproxyModel[];
   /** The catalog without models that are out of quota. Searches pick from these. */
   getAvailableModels: () => readonly CliproxyModel[];
-  getStandardCost: (modelId: string) => CliproxyModel["cost"] | undefined;
+  getStandardCost: (modelId: string) => CliproxyModel["cost"];
 }
 
 export interface PickSearchModelOptions {
-  /** Models to choose from, usually the catalog without out-of-quota models. */
   models: readonly CliproxyModel[];
-  getStandardCost: (modelId: string) => CliproxyModel["cost"] | undefined;
-  /** The configured searchModel, if any. */
+  /** Search requests never ask for the priority tier, so they rank and bill at standard prices. */
+  getStandardCost: (modelId: string) => CliproxyModel["cost"];
   preferred?: string;
 }
 
-/** The model web_search uses: the preferred one when available, else the best ranked. Shared with /cliproxyapi-status. */
+/** The search model, priced at standard rates. */
 export const pickSearchModel = (
   options: PickSearchModelOptions
-): CliproxyModel | undefined => {
-  const modelId = selectSearchModel(
+): CliproxyModel | undefined =>
+  selectSearchModel(
     options.models.map((model) => ({
-      cost: options.getStandardCost(model.id) ?? model.cost,
-      id: model.id,
-      supportsWebSearch: model.supportsWebSearch,
+      ...model,
+      cost: options.getStandardCost(model.id),
     })),
     options.preferred
   );
-
-  return options.models.find((candidate) => candidate.id === modelId);
-};
 
 /** Arguments that hand the choice back to pickSearchModel. A bare command means the same without a UI. */
 const AUTO_ARGUMENTS = new Set(["", "auto", "clear", "current", "reset"]);
@@ -122,22 +114,19 @@ export const registerWebSearch = (
       const startedAt = Date.now();
       const query = params.query.trim();
 
-      const connection = resolveExtensionConnection({
-        agentDir: options.agentDir,
-        env: process.env,
-        providerId: options.providerId,
-      });
+      const { settings } = options;
+      const connection = settings.connection();
 
       if (!connection) {
         throw new Error(
-          `CLIProxyAPI is not configured. Run /login ${options.providerId}.`
+          `CLIProxyAPI is not configured. Run /login ${settings.providerId}.`
         );
       }
 
       const model = pickSearchModel({
         getStandardCost: options.getStandardCost,
         models: options.getAvailableModels(),
-        preferred: loadCliproxyConfig(options.agentDir).searchModel,
+        preferred: settings.config().searchModel,
       });
 
       if (!model) {
@@ -145,12 +134,6 @@ export const registerWebSearch = (
           "No CLIProxyAPI search model is available. Run /cliproxyapi-refresh."
         );
       }
-
-      const standardCost = options.getStandardCost(model.id);
-
-      const pricedModel = standardCost
-        ? { ...model, cost: standardCost }
-        : model;
 
       const details: WebSearchDetails = {
         model: model.id,
@@ -160,7 +143,7 @@ export const registerWebSearch = (
 
       const result = await runWebSearch({
         apiKey: connection.apiKey,
-        model: pricedModel,
+        model,
         onProgress: (event) => {
           onUpdate?.({
             content: [{ text: event.message, type: "text" }],
@@ -174,15 +157,9 @@ export const registerWebSearch = (
 
       const text = appendSources(result.answer, result.sources);
 
-      const sources = result.sources.map((source) =>
-        source.title
-          ? { title: source.title, url: source.url }
-          : { url: source.url }
-      );
-
       const structuredContent: JsonRepresentation<WebSearchOutput> = {
         query,
-        sources,
+        sources: result.sources,
         text,
       };
 
@@ -218,7 +195,7 @@ export const registerWebSearch = (
   const searchModelIds = (): string[] =>
     options
       .getModels()
-      .filter((model) => model.supportsWebSearch)
+      .filter(canSearch)
       .map((model) => model.id);
 
   const saveSearchModel = (
@@ -226,10 +203,10 @@ export const registerWebSearch = (
     searchModel: string | undefined
   ): void => {
     try {
-      saveCliproxyConfig(options.agentDir, { searchModel });
+      options.settings.save({ searchModel });
     } catch (error) {
       ctx.ui.notify(
-        `Failed to save the web search model: ${error instanceof Error ? error.message : String(error)}`,
+        `Failed to save the web search model: ${errorText(error)}`,
         "error"
       );
 
@@ -286,22 +263,20 @@ export const registerWebSearch = (
         return;
       }
 
-      const model = options
-        .getModels()
-        .find(
-          (candidate) => candidate.id.toLowerCase() === requested.toLowerCase()
-        );
+      const model = searchModelIds().find(
+        (id) => id.toLowerCase() === requested.toLowerCase()
+      );
 
       if (!model) {
         ctx.ui.notify(
-          `Model "${requested}" is not in the CLIProxyAPI catalog.`,
+          `Model "${requested}" is not a CLIProxyAPI model that can search the web.`,
           "warning"
         );
 
         return;
       }
 
-      saveSearchModel(ctx, model.id);
+      saveSearchModel(ctx, model);
     },
   });
 };

@@ -3,9 +3,7 @@ export interface Endpoints {
   anthropicBaseUrl: string;
   openaiBaseUrl: string;
   modelsUrl: string;
-  messagesUrl: string;
   responsesUrl: string;
-  chatCompletionsUrl: string;
 }
 
 export interface ConnectionValues {
@@ -32,14 +30,13 @@ const OTHER_SCHEME = /^[a-z][a-z\d+.-]*:\/\//iu;
 const TRAILING_SLASHES = /\/+$/u;
 const LOOPBACK_HOSTS = new Set(["127.0.0.1", "[::1]", "localhost"]);
 
-/** The host part of a URL without a scheme, such as `host:8317` from `host:8317/v1`. */
 const bareHost = (input: string): string =>
   new URL(`http://${input}`).hostname.toLowerCase();
 
 const ENDPOINT_SUFFIX =
   /\/(?:v1(?:\/(?:models|messages|responses|chat\/completions))?|backend-api(?:\/codex\/responses)?)$/u;
 
-export const DEFAULT_BASE_URL = "http://127.0.0.1:8317";
+const DEFAULT_BASE_URL = "http://127.0.0.1:8317";
 
 export const resolveEndpoints = (baseUrl: string): Endpoints => {
   const input = baseUrl.trim();
@@ -52,7 +49,6 @@ export const resolveEndpoints = (baseUrl: string): Endpoints => {
     throw new Error("baseUrl must use HTTP or HTTPS");
   }
 
-  // A bare host gets https, unless it is this machine.
   const withScheme = HTTP_SCHEME.test(input)
     ? input
     : `${LOOPBACK_HOSTS.has(bareHost(input)) ? "http" : "https"}://${input}`;
@@ -78,8 +74,6 @@ export const resolveEndpoints = (baseUrl: string): Endpoints => {
 
   return {
     anthropicBaseUrl: rootUrl,
-    chatCompletionsUrl: `${rootUrl}/v1/chat/completions`,
-    messagesUrl: `${rootUrl}/v1/messages`,
     modelsUrl: `${rootUrl}/v1/models?client_version=cpa`,
     openaiBaseUrl: `${rootUrl}/v1`,
     responsesUrl: `${rootUrl}/v1/responses`,
@@ -87,50 +81,85 @@ export const resolveEndpoints = (baseUrl: string): Endpoints => {
   };
 };
 
-const firstSource = (
-  candidates: readonly (readonly [ValueSource, string | undefined])[]
-): ValueSource | undefined =>
-  candidates.find(([, value]) => value?.trim())?.[0];
+interface Sourced {
+  source: ValueSource;
+  value: string;
+}
 
-/** The sources resolveConnection takes its values from, in the same priority order. Never returns the values. */
+type Env = Readonly<Record<string, string | undefined>>;
+
+interface ResolvedValues {
+  baseUrl: Sourced;
+  apiKey?: Sourced;
+}
+
+const pick = (
+  key: keyof ConnectionValues,
+  envName: string,
+  env: Env,
+  file: ConnectionValues,
+  stored: ConnectionValues
+): Sourced | undefined => {
+  const candidates: [ValueSource, string | undefined][] = [
+    ["env", env[envName]],
+    ["cliproxyapi.json", file[key]],
+    ["login", stored[key]],
+  ];
+
+  for (const [source, raw] of candidates) {
+    const value = raw?.trim();
+
+    if (value) {
+      return { source, value };
+    }
+  }
+
+  return undefined;
+};
+
+const resolveValues = (
+  env: Env,
+  file: ConnectionValues,
+  stored: ConnectionValues
+): ResolvedValues => {
+  const baseUrl = pick("baseUrl", "CLIPROXYAPI_BASE_URL", env, file, stored);
+  const apiKey = pick("apiKey", "CLIPROXYAPI_API_KEY", env, file, stored);
+
+  return {
+    baseUrl: baseUrl ?? { source: "default", value: DEFAULT_BASE_URL },
+    ...(apiKey && { apiKey }),
+  };
+};
+
 export const resolveConnectionSources = (
-  env: Readonly<Record<string, string | undefined>>,
+  env: Env,
   file: ConnectionValues = {},
   stored: ConnectionValues = {}
 ): ConnectionSources => {
-  const baseUrl =
-    firstSource([
-      ["env", env.CLIPROXYAPI_BASE_URL],
-      ["cliproxyapi.json", file.baseUrl],
-      ["login", stored.baseUrl],
-    ]) ?? "default";
+  const { apiKey, baseUrl } = resolveValues(env, file, stored);
 
-  const apiKey = firstSource([
-    ["env", env.CLIPROXYAPI_API_KEY],
-    ["cliproxyapi.json", file.apiKey],
-    ["login", stored.apiKey],
-  ]);
-
-  return apiKey ? { apiKey, baseUrl } : { baseUrl };
+  return apiKey
+    ? { apiKey: apiKey.source, baseUrl: baseUrl.source }
+    : { baseUrl: baseUrl.source };
 };
 
+export const resolveBaseUrl = (
+  env: Env,
+  file: ConnectionValues = {},
+  stored: ConnectionValues = {}
+): string => resolveValues(env, file, stored).baseUrl.value;
+
+export const connectionTo = (
+  baseUrl: string,
+  apiKey: string
+): ResolvedConnection => ({ apiKey, baseUrl, ...resolveEndpoints(baseUrl) });
+
 export const resolveConnection = (
-  env: Readonly<Record<string, string | undefined>>,
+  env: Env,
   file: ConnectionValues = {},
   stored: ConnectionValues = {}
 ): ResolvedConnection | null => {
-  const baseUrl =
-    [env.CLIPROXYAPI_BASE_URL, file.baseUrl, stored.baseUrl, DEFAULT_BASE_URL]
-      .map((value) => value?.trim())
-      .find(Boolean) ?? DEFAULT_BASE_URL;
+  const { apiKey, baseUrl } = resolveValues(env, file, stored);
 
-  const apiKey = [env.CLIPROXYAPI_API_KEY, file.apiKey, stored.apiKey]
-    .map((value) => value?.trim())
-    .find(Boolean);
-
-  if (!apiKey) {
-    return null;
-  }
-
-  return { apiKey, baseUrl, ...resolveEndpoints(baseUrl) };
+  return apiKey ? connectionTo(baseUrl.value, apiKey.value) : null;
 };

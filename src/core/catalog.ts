@@ -1,5 +1,6 @@
 import type {
   AnthropicMessagesCompat,
+  Api,
   Model,
   ModelPromptCache,
   ThinkingLevelMap,
@@ -37,7 +38,7 @@ const OptionalString = Type.Optional(Type.String());
 const OptionalNumber = Type.Optional(Type.Number());
 const EffortName = Type.String();
 
-export const CatalogModelSchema = Type.Object({
+const CatalogModelSchema = Type.Object({
   context_window: OptionalNumber,
   cpa_capabilities: Type.Optional(
     Type.Object({
@@ -80,6 +81,24 @@ export const CatalogModelSchema = Type.Object({
 
 export type CatalogModel = Static<typeof CatalogModelSchema>;
 
+/** When a model was last listed. mergeCatalog keeps an unlisted model as stale for a while. */
+export interface Tracked {
+  id: string;
+  stale?: boolean;
+  lastSeenAt?: number;
+  staleSince?: number;
+}
+
+export const TrackedEntrySchema = Type.Object({
+  ...CatalogModelSchema.properties,
+  id: Type.String(),
+  lastSeenAt: OptionalNumber,
+  stale: Type.Optional(Type.Boolean()),
+  staleSince: OptionalNumber,
+});
+
+export type TrackedEntry = Static<typeof TrackedEntrySchema>;
+
 const CatalogEntries = Type.Array(CatalogModelSchema);
 
 const CatalogEnvelope = Type.Union([
@@ -88,15 +107,18 @@ const CatalogEnvelope = Type.Union([
   Type.Object({ data: CatalogEntries }),
 ]);
 
-export interface CliproxyModel extends Model<CliproxyApi> {
+export interface CliproxyModel extends Model<CliproxyApi>, Tracked {
   thoughtSummary: ThoughtSummary;
   supportsFast: boolean;
   supportsWebSearch?: boolean;
   thinkingLevelMap?: ThinkingLevelMap & { ultra?: string | null };
-  stale?: boolean;
-  lastSeenAt?: number;
-  staleSince?: number;
 }
+
+/** Models this provider built carry its own fields; pi hands back plain Model objects too. */
+export const isCliproxyModel = (model: Model<Api>): model is CliproxyModel =>
+  "thoughtSummary" in model && "supportsFast" in model;
+
+export const DEFAULT_PROVIDER_ID = "cliproxyapi";
 
 export interface MappingOptions {
   baseUrl: string;
@@ -115,11 +137,6 @@ export interface MappingOptions {
   anthropicCompat?: (id: string) => AnthropicMessagesCompat | undefined;
 }
 
-export interface MappedCatalog {
-  models: CliproxyModel[];
-  fastModelIds: string[];
-}
-
 export interface CatalogFetchOptions {
   baseUrl: string;
   apiKey: string;
@@ -133,7 +150,7 @@ export interface MergeOptions {
   staleTtlMs?: number;
 }
 
-export const DEFAULT_MODEL_STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const DEFAULT_MODEL_STALE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 
 const THINKING_LEVELS = [
   "off",
@@ -146,15 +163,18 @@ const THINKING_LEVELS = [
   "ultra",
 ] as const;
 
+/** The model part of a prefixed alias (`<channel>/<model>`, such as devin/claude-fable-5-1). */
+export const modelSegment = (id: string): string =>
+  id.slice(id.lastIndexOf("/") + 1);
+
 export const selectModelApi = (
   id: string,
   families: ModelFamilies = MODEL_API_BY_FAMILY
 ): CliproxyApi => {
   const modelId = id.trim().toLowerCase();
-  // Prefixed aliases (<channel>/<model>, e.g. devin/claude-fable-5-1) hide
-  // the family at the start, so also match the segment after the last "/".
-  // Full-id matches win, so an explicit prefixed pattern still takes over.
-  const segment = modelId.slice(modelId.lastIndexOf("/") + 1);
+  // A prefix hides the family, so the segment matches too. Full-id matches
+  // win, so an explicit prefixed pattern still takes over.
+  const segment = modelSegment(modelId);
   const candidates = segment === modelId ? [modelId] : [modelId, segment];
 
   for (const candidate of candidates) {
@@ -196,8 +216,7 @@ const positive = (...values: (number | undefined)[]): number | undefined =>
     (value) => value !== undefined && Number.isFinite(value) && value > 0
   );
 
-/** Applies a configured image input setting. Undefined keeps the catalog's modalities. */
-export const withImageInput = (
+const withImageInput = (
   input: readonly ("text" | "image")[],
   image: boolean | undefined
 ): ("text" | "image")[] => {
@@ -260,12 +279,7 @@ const webSearchCapability = (
     ? {}
     : { supportsWebSearch: entry.cpa_capabilities.web_search };
 
-/** Read once per mapping, so every model in one catalog gets the same tier. */
-const readFast = (options: MappingOptions): boolean =>
-  options.fast?.() ?? false;
-
-/** Sets compat and prompt cache on an Anthropic Messages model, including one loaded from an older cache. */
-export const applyAnthropicSettings = (
+const applyAnthropicSettings = (
   model: CliproxyModel,
   options: Pick<MappingOptions, "anthropicCompat" | "promptCache">
 ): void => {
@@ -301,16 +315,37 @@ const applyApiSettings = (
   }
 };
 
+export const catalogId = (entry: CatalogModel): string =>
+  (entry.slug ?? entry.id ?? "").trim();
+
+const tracking = (entry: CatalogModel & Partial<Tracked>): Partial<Tracked> => {
+  const result: Partial<Tracked> = {};
+
+  if (entry.stale !== undefined) {
+    result.stale = entry.stale;
+  }
+
+  if (entry.lastSeenAt !== undefined) {
+    result.lastSeenAt = entry.lastSeenAt;
+  }
+
+  if (entry.staleSince !== undefined) {
+    result.staleSince = entry.staleSince;
+  }
+
+  return result;
+};
+
 export const mapCatalog = (
-  entries: readonly CatalogModel[],
+  entries: readonly (CatalogModel & Partial<Tracked>)[],
   options: MappingOptions
-): MappedCatalog => {
+): CliproxyModel[] => {
   const endpoints = resolveEndpoints(options.baseUrl);
   const models = new Map<string, CliproxyModel>();
-  const fastPricing = readFast(options);
+  const fastPricing = options.fast?.() ?? false;
 
   for (const entry of entries) {
-    const id = (entry.slug ?? entry.id ?? "").trim();
+    const id = catalogId(entry);
 
     if (!id || entry.visibility?.toLowerCase() === "hide") {
       continue;
@@ -318,7 +353,9 @@ export const mapCatalog = (
 
     const api = selectModelApi(id, options.families);
 
-    const supportsFast = (entry.service_tiers?.length ?? 0) > 0;
+    // Only Responses requests carry the priority tier.
+    const supportsFast =
+      api === "openai-responses" && (entry.service_tiers?.length ?? 0) > 0;
 
     const model: CliproxyModel = {
       ...capabilities(entry, id, options),
@@ -328,18 +365,15 @@ export const mapCatalog = (
           ? endpoints.anthropicBaseUrl
           : endpoints.openaiBaseUrl,
       cost: options.costs
-        ? matchModelCost(
-            id,
-            options.costs,
-            fastPricing && supportsFast && api === "openai-responses"
-          )
+        ? matchModelCost(id, options.costs, fastPricing && supportsFast)
         : { ...ZERO_COST },
       id,
       name: (entry.display_name ?? entry.name ?? id).trim() || id,
-      provider: options.providerId ?? "cliproxyapi",
+      provider: options.providerId ?? DEFAULT_PROVIDER_ID,
       supportsFast,
       thoughtSummary: options.thoughtSummaries?.[id] ?? "omitted",
       ...webSearchCapability(entry),
+      ...tracking(entry),
     };
 
     applyApiSettings(model, entry, options);
@@ -347,17 +381,10 @@ export const mapCatalog = (
     models.set(id, model);
   }
 
-  const result = [...models.values()];
-
-  return {
-    fastModelIds: result.flatMap((model) =>
-      model.supportsFast ? [model.id] : []
-    ),
-    models: result,
-  };
+  return [...models.values()];
 };
 
-export class CatalogHttpError extends Error {
+class CatalogHttpError extends Error {
   readonly status: number;
   constructor(status: number, statusText: string) {
     super(`Catalog request failed: ${status} ${statusText}`);
@@ -412,14 +439,14 @@ export const fetchCatalog = async (
 export const withoutStale = <T extends object>(models: readonly T[]): T[] =>
   models.filter((model) => !("stale" in model && model.stale === true));
 
-export const mergeCatalog = (
-  previous: readonly CliproxyModel[],
-  fresh: readonly CliproxyModel[],
+export const mergeCatalog = <T extends Tracked>(
+  previous: readonly T[],
+  fresh: readonly T[],
   options: MergeOptions = {}
-): CliproxyModel[] => {
+): T[] => {
   const now = options.now ?? Date.now();
   const ttl = options.staleTtlMs ?? DEFAULT_MODEL_STALE_TTL_MS;
-  const merged = new Map<string, CliproxyModel>();
+  const merged = new Map<string, T>();
 
   for (const model of fresh) {
     const updated = { ...model, lastSeenAt: now, stale: false };

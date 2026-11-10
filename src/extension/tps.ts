@@ -4,8 +4,8 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 import type { PauseController } from "./pause.ts";
+import { ELAPSED_STATUS_KEY } from "./status-keys.ts";
 
-const STATUS_KEY = "tps";
 const REFRESH_INTERVAL_MS = 1000;
 
 const primaryUi = (ctx: ExtensionContext): boolean =>
@@ -46,7 +46,6 @@ const count = (value: number): string => value.toLocaleString("en-US");
 
 const seconds = (ms: number): string => (ms / MS_PER_SECOND).toFixed(1);
 
-/** The run summary: output speed over generation time, run length, and cache hit rate. */
 export const formatTpsSummary = (
   usage: TpsUsage,
   generationMs: number,
@@ -85,7 +84,6 @@ export const registerTpsFooter = (
 ): void => {
   let startedAt: number | undefined;
   let pausedAtStart = 0;
-  let pauseAtStart = false;
   let timer: ReturnType<typeof setInterval> | undefined;
   let statusContext: ExtensionContext | undefined;
   let usage = emptyUsage();
@@ -104,15 +102,13 @@ export const registerTpsFooter = (
       return 0;
     }
 
-    return pauseAtStart
-      ? pause.getElapsed(startedAt, pausedAtStart)
-      : Math.max(0, Date.now() - startedAt);
+    return pause.getElapsed(startedAt, pausedAtStart);
   };
 
   const showElapsed = (ctx: ExtensionContext): void => {
     if (primaryUi(ctx)) {
       ctx.ui.setStatus(
-        STATUS_KEY,
+        ELAPSED_STATUS_KEY,
         ctx.ui.theme.fg("dim", `⏱ ${formatElapsed(elapsed() / 1000)}`)
       );
     }
@@ -130,7 +126,6 @@ export const registerTpsFooter = (
     }
 
     startedAt = Date.now();
-    pauseAtStart = pause.isEnabled();
     pausedAtStart = pause.getPausedDuration(startedAt);
     usage = emptyUsage();
     generationMs = 0;
@@ -206,7 +201,7 @@ export const registerTpsFooter = (
     clearTimer();
 
     if (primaryUi(ctx)) {
-      ctx.ui.setStatus(STATUS_KEY, undefined);
+      ctx.ui.setStatus(ELAPSED_STATUS_KEY, undefined);
     }
 
     startedAt = undefined;

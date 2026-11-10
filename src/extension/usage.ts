@@ -1,4 +1,3 @@
-import { spawnSync } from "node:child_process";
 import path from "node:path";
 
 import type {
@@ -8,82 +7,29 @@ import type {
 import { Type } from "typebox";
 import type { Static } from "typebox";
 
+import { hasAccountWideQuota } from "../core/upstreams.ts";
 import {
   QUOTA_FALLBACK_MS,
   fetchUsage,
   quotaResetFromError,
   resetCooldowns as resetServerCooldowns,
+  ProviderUsageSchema,
   unavailableModels,
-} from "../core/index.ts";
-import type { ProviderUsage } from "../core/index.ts";
-import { loadCliproxyConfig, resolveExtensionConnection } from "./config.ts";
+} from "../core/usage.ts";
+import type { ProviderUsage } from "../core/usage.ts";
+import type { ManagementKeySource, Settings } from "./config.ts";
+import { errorText } from "./error-text.ts";
 import { readJsonMemo, writeJsonAtomic } from "./files.ts";
 import type { UsageSegment } from "./footer-render.ts";
 import { formatStatusLine, outUntil } from "./footer-render.ts";
+import { USAGE_STATUS_KEY } from "./status-keys.ts";
 
 /** Shared by every pi process, so a quota error in one agent hides the model in all of them. */
-export const USAGE_FILE_NAME = "cliproxyapi-usage.json";
-export const MANAGEMENT_KEY_ENV = "CLIPROXY_MANAGEMENT_KEY";
-
-/** A key command's output, or why it gave none. Never holds the command text. */
-type KeyCommandResult = { key: string } | { error: string };
-
-const commandKeys = new Map<string, KeyCommandResult>();
-
-const runKeyCommand = (command: string): KeyCommandResult => {
-  const result = spawnSync("/bin/sh", ["-c", command], {
-    encoding: "utf-8",
-    stdio: ["ignore", "pipe", "ignore"],
-    timeout: 10_000,
-  });
-
-  if (result.error || result.signal) {
-    return { error: "the key command timed out or could not start" };
-  }
-
-  if (result.status !== 0) {
-    return { error: `the key command exited with status ${result.status}` };
-  }
-
-  const key = result.stdout.trim();
-
-  return key ? { key } : { error: "the key command printed nothing" };
-};
-
-/**
- * A managementKey that starts with "!" is a shell command whose output is the key, as with keys in
- * pi's auth.json. Each command runs once per process, and a failure stays cached, as in pi.
- */
-const resolveKeyValue = (value: string): KeyCommandResult => {
-  if (!value.startsWith("!")) {
-    return { key: value };
-  }
-
-  const cached = commandKeys.get(value) ?? runKeyCommand(value.slice(1));
-  commandKeys.set(value, cached);
-
-  return cached;
-};
+const USAGE_FILE_NAME = "cliproxyapi-usage.json";
 
 /** How old the shared usage snapshot may get before a session fetches a new one. */
 const USAGE_TTL_MS = 2 * 60_000;
-const STATUS_KEY = "cliproxyapi-usage";
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
-
-const UsageWindowSchema = Type.Object({
-  label: Type.String(),
-  resetAt: Type.Optional(Type.Number()),
-  usedPercent: Type.Number(),
-});
-
-const ProviderUsageSchema = Type.Object({
-  exhaustedUntil: Type.Optional(Type.Number()),
-  models: Type.Array(Type.String()),
-  name: Type.String(),
-  observedAt: Type.Optional(Type.Number()),
-  provider: Type.String(),
-  windows: Type.Array(UsageWindowSchema),
-});
 
 const UsageFileSchema = Type.Object({
   baseUrl: Type.Optional(Type.String()),
@@ -97,8 +43,6 @@ type UsageFile = Static<typeof UsageFileSchema>;
 
 const EMPTY: UsageFile = { exhausted: {}, providers: [] };
 
-export type ManagementKeySource = "env" | "cliproxyapi.json";
-
 /** For /cliproxyapi-status. Holds where the key comes from, never the key. */
 export interface ManagementStatus {
   source: ManagementKeySource;
@@ -107,15 +51,12 @@ export interface ManagementStatus {
 }
 
 export interface UsageTrackerOptions {
-  agentDir: string;
-  providerId: string;
-  env?: Readonly<Record<string, string | undefined>>;
-  fetchFn?: typeof fetch;
+  settings: Settings;
 }
 
 export class UsageTracker {
   private readonly filePath: string;
-  private readonly options: UsageTrackerOptions;
+  private readonly settings: Settings;
   /** Quota marks this tracker guessed, by model id, until a usage fetch names the real reset. */
   private readonly guessedMarks = new Map<
     string,
@@ -123,50 +64,8 @@ export class UsageTracker {
   >();
 
   constructor(options: UsageTrackerOptions) {
-    this.options = options;
-    this.filePath = path.join(options.agentDir, USAGE_FILE_NAME);
-  }
-
-  private connection() {
-    return resolveExtensionConnection({
-      agentDir: this.options.agentDir,
-      env: this.options.env ?? process.env,
-      providerId: this.options.providerId,
-    });
-  }
-
-  private managementKeyWithSource():
-    | { key: string; source: ManagementKeySource }
-    | undefined {
-    const env = this.options.env ?? process.env;
-    const fromEnv = env[MANAGEMENT_KEY_ENV]?.trim();
-
-    if (fromEnv) {
-      return { key: fromEnv, source: "env" };
-    }
-
-    const configured = loadCliproxyConfig(this.options.agentDir).managementKey;
-    const fromFile = configured ? resolveKeyValue(configured) : undefined;
-
-    return fromFile && "key" in fromFile
-      ? { key: fromFile.key, source: "cliproxyapi.json" }
-      : undefined;
-  }
-
-  /** Why the managementKey command in cliproxyapi.json gave no key, when it failed and no env key overrides it. */
-  managementKeyError(): string | undefined {
-    if ((this.options.env ?? process.env)[MANAGEMENT_KEY_ENV]?.trim()) {
-      return undefined;
-    }
-
-    const configured = loadCliproxyConfig(this.options.agentDir).managementKey;
-    const result = configured ? resolveKeyValue(configured) : undefined;
-
-    return result && "error" in result ? result.error : undefined;
-  }
-
-  private managementKey(): string | undefined {
-    return this.managementKeyWithSource()?.key;
+    this.settings = options.settings;
+    this.filePath = path.join(options.settings.agentDir, USAGE_FILE_NAME);
   }
 
   /**
@@ -193,43 +92,28 @@ export class UsageTracker {
     writeJsonAtomic(this.filePath, { ...next, exhausted });
   }
 
-  /** Accounts from the last usage fetch for the current base URL. */
-  private providers(file: UsageFile): ProviderUsage[] {
-    return file.baseUrl === this.connection()?.baseUrl ? file.providers : [];
+  /** The snapshot's accounts and fetch time count only for the base URL they were fetched from. */
+  private current(file: UsageFile): {
+    providers: ProviderUsage[];
+    fetchedAt?: number;
+  } {
+    return file.baseUrl === this.settings.connection()?.baseUrl
+      ? { fetchedAt: file.fetchedAt, providers: file.providers }
+      : { providers: [] };
   }
 
-  hasManagementKey(): boolean {
-    return this.managementKey() !== undefined;
-  }
-
-  /** The management key's source and the usage snapshot's time, or undefined without a key. */
   managementStatus(): ManagementStatus | undefined {
-    const managed = this.managementKeyWithSource();
+    const managed = this.settings.managementKey();
 
-    if (!managed) {
+    if (!managed || !("key" in managed)) {
       return undefined;
     }
 
-    const file = this.read();
+    const { fetchedAt } = this.current(this.read());
 
-    const usageFetchedAt =
-      file.baseUrl === this.connection()?.baseUrl ? file.fetchedAt : undefined;
-
-    return usageFetchedAt === undefined
+    return fetchedAt === undefined
       ? { source: managed.source }
-      : { source: managed.source, usageFetchedAt };
-  }
-
-  /** Base URL and management key for management commands, or undefined when either is unavailable. */
-  managementAccess(): { baseUrl: string; managementKey: string } | undefined {
-    const managementKey = this.managementKey();
-    const connection = this.connection();
-
-    if (!managementKey || !connection) {
-      return undefined;
-    }
-
-    return { baseUrl: connection.baseUrl, managementKey };
+      : { source: managed.source, usageFetchedAt: fetchedAt };
   }
 
   /**
@@ -246,7 +130,7 @@ export class UsageTracker {
     // exhaustion hide a model the reset account can serve again. Local
     // quota-error marks in file.exhausted are merged separately and still hide.
     return unavailableModels(
-      this.providers(file),
+      this.current(file).providers,
       file.exhausted,
       now,
       (account, model) => {
@@ -260,7 +144,6 @@ export class UsageTracker {
     );
   }
 
-  /** Model ids that no account can serve now, each with the time it comes back. */
   hidden(now = Date.now()): Map<string, number> {
     return this.hiddenFrom(this.read(), now);
   }
@@ -299,10 +182,11 @@ export class UsageTracker {
     const marked: string[] = [];
 
     this.write((file) => {
-      const siblings = this.providers(file)
-        .filter(
+      const siblings = this.current(file)
+        .providers.filter(
           (account) =>
-            account.provider !== "claude" && account.models.includes(modelId)
+            hasAccountWideQuota(account.provider) &&
+            account.models.includes(modelId)
         )
         .flatMap((account) => account.models);
 
@@ -335,110 +219,62 @@ export class UsageTracker {
     return this.hiddenFrom({ ...file, exhausted: {} }, now);
   }
 
-  /**
-   * Clears local quota marks from the shared exhausted map: one model, or
-   * every model when no id is given. Returns the model ids that were cleared.
-   */
-  clearExhausted(modelId?: string): string[] {
-    const cleared = Object.keys(this.read().exhausted).filter(
-      (id) => modelId === undefined || id === modelId
+  private clearMarks(
+    ids: readonly string[] | undefined,
+    extra: (file: UsageFile) => Partial<UsageFile> = () => ({})
+  ): boolean {
+    const marked = Object.keys(this.read().exhausted).some(
+      (id) => ids === undefined || ids.includes(id)
     );
-
-    if (cleared.length === 0) {
-      return cleared;
-    }
 
     this.write((file) => ({
       ...file,
+      ...extra(file),
       exhausted:
-        modelId === undefined
+        ids === undefined
           ? {}
           : Object.fromEntries(
-              Object.entries(file.exhausted).filter(([id]) => id !== modelId)
+              Object.entries(file.exhausted).filter(([id]) => !ids.includes(id))
             ),
     }));
 
-    return cleared;
+    return marked;
   }
 
-  /**
-   * Resets cooldowns on the server and clears the matching local quota
-   * marks, so pi stops hiding the models too. Returns the model ids the
-   * server reports as affected.
-   */
   async resetCooldowns(modelId?: string): Promise<string[]> {
-    const managementKey = this.managementKey();
-    const connection = this.connection();
-
-    if (!managementKey) {
-      throw new Error(
-        `No CLIProxyAPI management key is configured. Set ${MANAGEMENT_KEY_ENV} in the environment or "managementKey" in cliproxyapi.json, then try again.`
-      );
-    }
-
-    if (!connection) {
-      throw new Error(
-        "CLIProxyAPI is not configured, so its cooldowns cannot be reset."
-      );
-    }
-
     const affected = await resetServerCooldowns({
-      baseUrl: connection.baseUrl,
-      fetch: this.options.fetchFn,
-      managementKey,
+      ...this.settings.requireManagementAccess(),
       modelId,
     });
 
-    if (modelId === undefined) {
-      this.clearExhausted();
-    } else {
-      // A server reset clears the whole credential, so its other models
-      // come back too: recordError hid them locally alongside this one.
-      for (const id of new Set([modelId, ...affected])) {
-        this.clearExhausted(id);
-      }
-    }
-
-    // The server preserves quota observations across a reset; remember when
-    // each model was reset so hiddenFrom can ignore the older observations.
+    // A server reset clears the whole credential, so its other models come
+    // back too: recordError hid them locally alongside this one. The server
+    // keeps its quota observations across a reset, so the reset time lets
+    // hiddenFrom ignore the older ones.
     const resetAt = Date.now();
     const resetIds = modelId === undefined ? affected : [modelId, ...affected];
 
-    if (resetIds.length > 0) {
-      this.write((file) => ({
-        ...file,
-        resets: {
-          ...file.resets,
-          ...Object.fromEntries(resetIds.map((id) => [id, resetAt])),
-        },
-      }));
-    }
+    this.clearMarks(modelId === undefined ? undefined : resetIds, (file) => ({
+      resets: {
+        ...file.resets,
+        ...Object.fromEntries(resetIds.map((id) => [id, resetAt])),
+      },
+    }));
 
     return affected;
   }
 
   /** A reply proves the model works again. True when that cleared a quota mark. */
   recordSuccess(modelId: string): boolean {
-    if (this.read().exhausted[modelId] === undefined) {
-      return false;
-    }
-
-    this.write((file) => ({
-      ...file,
-      exhausted: Object.fromEntries(
-        Object.entries(file.exhausted).filter(([id]) => id !== modelId)
-      ),
-    }));
-
-    return true;
+    return (
+      this.read().exhausted[modelId] !== undefined && this.clearMarks([modelId])
+    );
   }
 
-  /** Fetches usage when the shared snapshot is older than its TTL. Needs the management key. */
   async refresh(force = false, signal?: AbortSignal): Promise<void> {
-    const managementKey = this.managementKey();
-    const connection = this.connection();
+    const access = this.settings.managementAccess();
 
-    if (!managementKey || !connection) {
+    if (!access) {
       return;
     }
 
@@ -446,7 +282,7 @@ export class UsageTracker {
 
     if (
       !force &&
-      current.baseUrl === connection.baseUrl &&
+      current.baseUrl === access.baseUrl &&
       current.fetchedAt !== undefined &&
       Date.now() - current.fetchedAt < USAGE_TTL_MS
     ) {
@@ -456,9 +292,7 @@ export class UsageTracker {
     const startedAt = Date.now();
 
     const providers = await fetchUsage({
-      baseUrl: connection.baseUrl,
-      fetch: this.options.fetchFn,
-      managementKey,
+      ...access,
       signal,
     });
 
@@ -467,7 +301,7 @@ export class UsageTracker {
 
       const next: UsageFile = {
         ...file,
-        baseUrl: connection.baseUrl,
+        baseUrl: access.baseUrl,
         fetchedAt,
         providers,
       };
@@ -494,16 +328,17 @@ export class UsageTracker {
     });
   }
 
-  /** When the next hidden model comes back or the snapshot goes stale, whichever is first. */
   nextChangeAt(now = Date.now()): number {
     const returns = [...this.hidden(now).values()];
     const fetchedAt = this.read().fetchedAt ?? now;
-    const stale = this.hasManagementKey() ? fetchedAt + USAGE_TTL_MS : Infinity;
+
+    const stale = this.settings.managementAccess()
+      ? fetchedAt + USAGE_TTL_MS
+      : Infinity;
 
     return Math.max(now + 1000, Math.min(stale, ...returns));
   }
 
-  /** The accounts behind the given catalog as footer segments, in file order. */
   segments(
     catalogIds: readonly string[],
     currentModelId?: string,
@@ -515,7 +350,7 @@ export class UsageTracker {
     const covered = new Set<string>();
     const segments: UsageSegment[] = [];
 
-    for (const account of this.providers(file)) {
+    for (const account of this.current(file).providers) {
       const models = account.models.filter((model) => catalog.has(model));
 
       if (models.length === 0) {
@@ -553,21 +388,7 @@ export class UsageTracker {
         current,
         kind: "windows",
         name: account.name,
-        windows: account.windows.map((window) => {
-          const mapped: Extract<
-            UsageSegment,
-            { kind: "windows" }
-          >["windows"][number] = {
-            label: window.label,
-            usedPercent: window.usedPercent,
-          };
-
-          if (window.resetAt !== undefined) {
-            mapped.resetAt = window.resetAt;
-          }
-
-          return mapped;
-        }),
+        windows: account.windows,
       });
     }
 
@@ -582,13 +403,14 @@ export class UsageTracker {
 }
 
 export interface RegisterUsageOptions {
-  providerId: string;
+  settings: Settings;
   tracker: UsageTracker;
+  /** Recomputes pi's available list through filterModels without a network call. Throws on failure. */
+  reapplyFilter: (ctx: ExtensionContext) => Promise<void>;
   getCatalogIds: () => readonly string[];
 }
 
 export interface UsageHandle {
-  /** Fetches usage now and applies it, for /cliproxyapi-refresh. */
   refresh: (ctx: ExtensionContext) => Promise<void>;
 }
 
@@ -600,7 +422,8 @@ export const registerUsage = (
   pi: ExtensionAPI,
   options: RegisterUsageOptions
 ): UsageHandle => {
-  const { providerId, tracker } = options;
+  const { tracker } = options;
+  const { providerId } = options.settings;
   let active: ExtensionContext | undefined;
   let timer: ReturnType<typeof setTimeout> | undefined;
   let lastHidden = "";
@@ -644,11 +467,7 @@ export const registerUsage = (
 
     if (key !== lastHidden) {
       lastHidden = key;
-      // Recomputes pi's available list through filterModels without a network call.
-      await ctx.modelRegistry.refresh({
-        allowNetwork: false,
-        providers: [providerId],
-      });
+      await options.reapplyFilter(ctx);
     }
 
     noticeCurrentModel(ctx, hidden);
@@ -658,7 +477,7 @@ export const registerUsage = (
     }
 
     ctx.ui.setStatus(
-      STATUS_KEY,
+      USAGE_STATUS_KEY,
       formatStatusLine(
         tracker.segments(
           options.getCatalogIds(),
@@ -669,15 +488,11 @@ export const registerUsage = (
     );
   };
 
-  /** Applies the usage file to pi without a network call. */
   const syncNow = async (ctx: ExtensionContext): Promise<void> => {
     try {
       await sync(ctx);
     } catch (error) {
-      warn(
-        ctx,
-        `CLIProxyAPI model list: ${error instanceof Error ? error.message : String(error)}`
-      );
+      warn(ctx, `CLIProxyAPI model list: ${errorText(error)}`);
     }
   };
 
@@ -688,10 +503,7 @@ export const registerUsage = (
     try {
       await tracker.refresh(force);
     } catch (error) {
-      warn(
-        ctx,
-        `CLIProxyAPI usage: ${error instanceof Error ? error.message : String(error)}`
-      );
+      warn(ctx, `CLIProxyAPI usage: ${errorText(error)}`);
     }
 
     await syncNow(ctx);
@@ -706,12 +518,10 @@ export const registerUsage = (
 
     const delay = tracker.nextChangeAt() - Date.now();
 
-    // Nothing will change without a management key or a hidden model.
     if (!Number.isFinite(delay)) {
       return;
     }
 
-    // Wakes when a hidden model comes back or the usage snapshot goes stale.
     timer = setTimeout(
       () => {
         timer = undefined;
@@ -754,12 +564,12 @@ export const registerUsage = (
   });
   pi.on("session_start", async (_event, ctx) => {
     active = ctx;
-    const keyError = tracker.managementKeyError();
+    const managed = options.settings.managementKey();
 
-    if (keyError) {
+    if (managed && "error" in managed) {
       warn(
         ctx,
-        `CLIProxyAPI management key from cliproxyapi.json is unavailable: ${keyError}. The usage footer, /cliproxyapi-login, and /cliproxyapi-reset need it.`
+        `CLIProxyAPI management key from cliproxyapi.json is unavailable: ${managed.error}. The usage footer, /cliproxyapi-login, and /cliproxyapi-reset need it.`
       );
     }
 
@@ -782,7 +592,7 @@ export const registerUsage = (
     }
 
     if (ctx.hasUI) {
-      ctx.ui.setStatus(STATUS_KEY, undefined);
+      ctx.ui.setStatus(USAGE_STATUS_KEY, undefined);
     }
   });
 

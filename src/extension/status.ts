@@ -1,8 +1,11 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
-import type { ThoughtSummary, ValueSource } from "../core/index.ts";
-import { MANAGEMENT_KEY_ENV } from "./usage.ts";
-import type { ManagementKeySource } from "./usage.ts";
+import type { ThoughtSummary } from "../core/catalog.ts";
+import type { ValueSource } from "../core/connection.ts";
+import { DAY_MS, HOUR_MS, MINUTE_MS } from "../core/time.ts";
+import { MANAGEMENT_KEY_ENV } from "./config.ts";
+import type { ManagementKeySource } from "./config.ts";
+import { errorText } from "./error-text.ts";
 
 /** Everything /cliproxyapi-status shows. It holds where keys come from, never the keys. */
 export interface StatusSnapshot {
@@ -28,9 +31,6 @@ export interface StatusSnapshot {
   thinking: Readonly<Record<string, ThoughtSummary>>;
 }
 
-const MINUTE_MS = 60_000;
-const HOUR_MS = 60 * MINUTE_MS;
-const DAY_MS = 24 * HOUR_MS;
 const ETAG_PREFIX_LENGTH = 8;
 const ETAG_WRAPPING = /^(?:W\/)?"?|"$/gu;
 
@@ -49,7 +49,6 @@ const MANAGEMENT_SOURCE_LABELS: Readonly<Record<ManagementKeySource, string>> =
 
 const THINKING_ORDER: readonly ThoughtSummary[] = ["summarized", "omitted"];
 
-/** "just now", "4 min old", "3 h old", "2 d old". */
 const formatShortAge = (ageMs: number): string => {
   if (ageMs < MINUTE_MS) {
     return "just now";
@@ -132,7 +131,6 @@ const formatThinking = (thinking: StatusSnapshot["thinking"]): string => {
   return groups.length > 0 ? groups.join("; ") : "omitted for all models";
 };
 
-/** The seven-line block /cliproxyapi-status shows. */
 export const formatStatus = (snapshot: StatusSnapshot): string =>
   [
     `CLIProxyAPI  ${snapshot.baseUrl}  ${snapshot.keySource ? KEY_SOURCE_LABELS[snapshot.keySource] : "not configured"}`,
@@ -162,7 +160,7 @@ export const registerStatus = (
         ctx.ui.notify(formatStatus(gather()), "info");
       } catch (error) {
         ctx.ui.notify(
-          `Failed to read CLIProxyAPI status: ${error instanceof Error ? error.message : String(error)}`,
+          `Failed to read CLIProxyAPI status: ${errorText(error)}`,
           "error"
         );
       }

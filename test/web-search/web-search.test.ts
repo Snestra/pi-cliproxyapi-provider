@@ -4,12 +4,9 @@ import test from "node:test";
 
 import type { Model } from "@earendil-works/pi-ai";
 
-import {
-  resolveResponsesEndpoint,
-  runWebSearch,
-  selectSearchModel,
-} from "../../src/web-search/index.ts";
-import type { WebSearchProgressEvent } from "../../src/web-search/index.ts";
+import { selectSearchModel } from "../../src/web-search/model-selector.ts";
+import { runWebSearch } from "../../src/web-search/search.ts";
+import type { WebSearchProgressEvent } from "../../src/web-search/search.ts";
 
 interface CapturedRequest {
   init?: RequestInit;
@@ -96,6 +93,13 @@ const searchModel = {
   reasoning: false,
 } as Model<"openai-responses">;
 
+const modelNamed = (id: string): Model<"openai-responses"> => ({
+  ...searchModel,
+  id,
+});
+
+const RESPONSES_URL = "https://proxy.example/v1/responses";
+
 test("answer comes from the last message item, not the first", async () => {
   const text = await fixtureText("later-message.sse");
   const captured: CapturedRequest = {};
@@ -104,11 +108,11 @@ test("answer comes from the last message item, not the first", async () => {
   const result = await runWebSearch({
     apiKey: "test-key",
     fetchFn: fetchReturning(streamFromChunks(splitBytes(text, 4096)), captured),
-    model: "kimi-test",
+    model: modelNamed("kimi-test"),
     onProgress: (event) => progress.push(event),
     query: "  latest pi release  ",
     referenceDate: new Date("2026-10-24T00:00:00.000Z"),
-    responsesUrl: "https://proxy.example",
+    responsesUrl: RESPONSES_URL,
   });
 
   assert.equal(result.answer, "Final answer from the later item.");
@@ -116,7 +120,7 @@ test("answer comes from the last message item, not the first", async () => {
     { title: "Example Report", url: "https://example.com/report" },
     { title: "Final Source", url: "https://example.com/final" },
   ]);
-  assert.equal(captured.url, "https://proxy.example/v1/responses");
+  assert.equal(captured.url, RESPONSES_URL);
 
   const body: CapturedBody = JSON.parse(String(captured.init?.body));
   assert.equal(body.model, "kimi-test");
@@ -137,10 +141,11 @@ test("stream split across chunk boundaries still parses", async () => {
   const text = await fixtureText("later-message.sse");
 
   const result = await runWebSearch({
+    apiKey: "test-key",
     fetchFn: fetchReturning(streamFromChunks(splitBytes(text, 7))),
-    model: "claude-test",
+    model: modelNamed("claude-test"),
     query: "latest pi release",
-    responsesUrl: "https://proxy.example/v1",
+    responsesUrl: RESPONSES_URL,
   });
 
   assert.equal(result.answer, "Final answer from the later item.");
@@ -152,10 +157,11 @@ test("error event rejects with the server message", async () => {
 
   await assert.rejects(
     runWebSearch({
+      apiKey: "test-key",
       fetchFn: fetchReturning(streamFromChunks(splitBytes(text, 64))),
-      model: "gpt-test",
+      model: searchModel,
       query: "boom",
-      responsesUrl: "https://proxy.example/v1",
+      responsesUrl: RESPONSES_URL,
     }),
     /Search backend exploded/u
   );
@@ -175,15 +181,16 @@ test("abort during streaming rejects", async () => {
   });
 
   const promise = runWebSearch({
+    apiKey: "test-key",
     fetchFn: fetchReturning(body),
-    model: "gpt-test",
+    model: searchModel,
     onProgress: (event) => {
       if (event.phase === "searching") {
         controller.abort();
       }
     },
     query: "slow search",
-    responsesUrl: "https://proxy.example/v1",
+    responsesUrl: RESPONSES_URL,
     signal: controller.signal,
   });
 
@@ -194,10 +201,11 @@ test("usage is pi-ai shaped and cost is computed for a pi-ai Model", async () =>
   const text = await fixtureText("later-message.sse");
 
   const result = await runWebSearch({
+    apiKey: "test-key",
     fetchFn: fetchReturning(streamFromChunks(splitBytes(text, 4096))),
     model: searchModel,
     query: "latest pi release",
-    responsesUrl: "https://proxy.example/v1/responses",
+    responsesUrl: RESPONSES_URL,
   });
 
   assert.ok(result.usage);
@@ -216,63 +224,34 @@ test("usage is pi-ai shaped and cost is computed for a pi-ai Model", async () =>
   );
 });
 
-test("resolveResponsesEndpoint only reaches the v1 responses path", () => {
-  assert.equal(
-    resolveResponsesEndpoint("https://proxy.example"),
-    "https://proxy.example/v1/responses"
-  );
-  assert.equal(
-    resolveResponsesEndpoint("https://proxy.example/"),
-    "https://proxy.example/v1/responses"
-  );
-  assert.equal(
-    resolveResponsesEndpoint("https://proxy.example/v1"),
-    "https://proxy.example/v1/responses"
-  );
-  assert.equal(
-    resolveResponsesEndpoint("https://proxy.example/v1/responses"),
-    "https://proxy.example/v1/responses"
-  );
-  assert.equal(
-    resolveResponsesEndpoint("https://proxy.example/backend-api/codex"),
-    "https://proxy.example/backend-api/codex/v1/responses"
-  );
-  assert.equal(
-    resolveResponsesEndpoint("https://proxy.example/backend-api"),
-    "https://proxy.example/backend-api/v1/responses"
-  );
-});
-
 const ids = (...modelIds: string[]) => modelIds.map((id) => ({ id }));
 const priced = (id: string, input: number) => ({ cost: { input }, id });
 
 test("selectSearchModel prefers the preferred id, then fast GPT, then Claude Haiku", () => {
   assert.equal(
-    selectSearchModel(
-      ids("claude-haiku-4-5", "gpt-5-fast"),
-      "claude-haiku-4-5"
-    ),
+    selectSearchModel(ids("claude-haiku-4-5", "gpt-5-fast"), "claude-haiku-4-5")
+      ?.id,
     "claude-haiku-4-5"
   );
   assert.equal(
-    selectSearchModel(ids("claude-haiku-4-5", "gpt-5-fast")),
+    selectSearchModel(ids("claude-haiku-4-5", "gpt-5-fast"))?.id,
     "gpt-5-fast"
   );
   assert.equal(
-    selectSearchModel(ids("gpt-6-luna", "claude-haiku-4-5")),
+    selectSearchModel(ids("gpt-6-luna", "claude-haiku-4-5"))?.id,
     "gpt-6-luna"
   );
   assert.equal(
-    selectSearchModel(ids("kimi-k3", "claude-haiku-4-5")),
+    selectSearchModel(ids("kimi-k3", "claude-haiku-4-5"))?.id,
     "claude-haiku-4-5"
   );
   assert.equal(
-    selectSearchModel(ids("kimi-k3", "claude-sonnet-5")),
+    selectSearchModel(ids("kimi-k3", "claude-sonnet-5"))?.id,
     "claude-sonnet-5"
   );
   assert.equal(selectSearchModel([], "gpt-5-fast"), undefined);
   assert.equal(
-    selectSearchModel(ids("GPT-5-FAST"), "gpt-5-fast"),
+    selectSearchModel(ids("GPT-5-FAST"), "gpt-5-fast")?.id,
     "GPT-5-FAST"
   );
 });
@@ -286,18 +265,19 @@ test("selectSearchModel picks the cheapest priced model within a family group", 
       priced("gpt-6-astra", 20),
       priced("gpt-6-luna", 0.2),
       priced("claude-haiku-5-5", 0.1),
-    ]),
+    ])?.id,
     "gpt-6-luna"
   );
   // Zero cost means unknown pricing, so it must not win over a priced model.
   assert.equal(
-    selectSearchModel([priced("gpt-unpriced", 0), priced("gpt-6-luna", 0.2)]),
+    selectSearchModel([priced("gpt-unpriced", 0), priced("gpt-6-luna", 0.2)])
+      ?.id,
     "gpt-6-luna"
   );
   // Equal or unknown prices keep catalog order.
   assert.equal(
-    selectSearchModel([priced("gpt-a", 1), priced("gpt-b", 1)]),
+    selectSearchModel([priced("gpt-a", 1), priced("gpt-b", 1)])?.id,
     "gpt-a"
   );
-  assert.equal(selectSearchModel(ids("gpt-a", "gpt-b")), "gpt-a");
+  assert.equal(selectSearchModel(ids("gpt-a", "gpt-b"))?.id, "gpt-a");
 });

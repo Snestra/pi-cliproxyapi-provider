@@ -3,7 +3,7 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { runWebSearch } from "../../src/web-search/index.ts";
+import { runWebSearch } from "../../src/web-search/search.ts";
 import {
   PROJECT_ROOT,
   createCheck,

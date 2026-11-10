@@ -10,7 +10,6 @@ import path from "node:path";
 import type { Static, TSchema } from "typebox";
 import { Value } from "typebox/value";
 
-/** Undefined when the file is missing. Throws, naming the file and field, when it breaks the schema. */
 export const readJsonFile = <Schema extends TSchema>(
   filePath: string,
   schema: Schema
@@ -60,10 +59,8 @@ interface MemoEntry {
   value: unknown;
 }
 
-/** Tells apart readers of one file: readJsonMemo's schema, or memoByFile's caller key. */
 type MemoKey = TSchema | string;
 
-/** Parsed values per file path, then per reader key. */
 const memo = new Map<string, Map<MemoKey, MemoEntry>>();
 
 const sameStamp = (left: FileStamp, right: FileStamp): boolean =>

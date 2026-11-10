@@ -1,6 +1,6 @@
 // Check 2: one real chat turn per model family returns text and usage on its chosen API.
-import { MODEL_API_BY_FAMILY } from "../../src/core/index.ts";
-import type { ModelFamilies } from "../../src/core/index.ts";
+import { MODEL_API_BY_FAMILY } from "../../src/core/catalog.ts";
+import type { ModelFamilies } from "../../src/core/catalog.ts";
 import { FAMILY_MODELS, createCheck, liveModels, saveOutput } from "./live.ts";
 
 // CHAT_FAMILIES='{"*":"openai-completions","claude-*":"anthropic-messages"}' compares another API choice.

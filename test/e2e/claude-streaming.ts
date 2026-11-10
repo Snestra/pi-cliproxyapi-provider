@@ -1,7 +1,7 @@
 // Check 4: with the default thought-summary setting, Claude text streams over time.
 import type { StreamOptions } from "@earendil-works/pi-ai";
 
-import type { ThoughtSummary } from "../../src/core/index.ts";
+import type { ThoughtSummary } from "../../src/core/catalog.ts";
 import { createCheck, liveModels, saveOutput } from "./live.ts";
 
 const MODEL_ID = "claude-haiku-5-5";

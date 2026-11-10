@@ -11,7 +11,6 @@ export interface ManagementRequestOptions {
   managementKey: string;
   fetch?: typeof globalThis.fetch;
   signal?: AbortSignal;
-  /** Per-request timeout. */
   timeoutMs?: number;
 }
 
@@ -21,7 +20,6 @@ const ErrorSchema = Type.Object({
   error: Type.Optional(Type.String()),
 });
 
-/** Undefined when the text is not JSON or breaks the schema. */
 export const parseJson = <Schema extends TSchema>(
   schema: Schema,
   text: string
@@ -45,7 +43,6 @@ export class ManagementHttpError extends Error {
   }
 }
 
-/** One management API call, checked against `schema`. */
 export const managementRequest = async <Schema extends TSchema>(
   options: ManagementRequestOptions,
   route: string,

@@ -1,7 +1,6 @@
 import { calculateCost } from "@earendil-works/pi-ai";
 import type { Api, Model, Usage } from "@earendil-works/pi-ai";
 
-import { resolveResponsesEndpoint } from "./endpoint.ts";
 import { consumeSseStream } from "./sse.ts";
 import type { SseEvent } from "./sse.ts";
 
@@ -18,23 +17,15 @@ export type WebSearchProgressPhase =
   | "done";
 
 export interface WebSearchProgressEvent {
-  type: WebSearchProgressPhase;
   phase: WebSearchProgressPhase;
   message: string;
-  model: string;
-  query: string;
-  searchQuery?: string;
-  chars?: number;
-  sourcesCount?: number;
-  durationMs?: number;
 }
 
 export interface RunWebSearchOptions {
-  /** CLIProxyAPI root, `/v1` base URL, or full `/v1/responses` URL. */
   responsesUrl: string;
-  apiKey?: string;
-  /** A model id, or a pi-ai Model when usage cost should be priced. */
-  model: string | Model<Api>;
+  apiKey: string;
+  /** Its cost prices the search's usage. */
+  model: Model<Api>;
   query: string;
   signal?: AbortSignal;
   onProgress?: (event: WebSearchProgressEvent) => void;
@@ -108,16 +99,12 @@ interface SearchStreamState {
   streamedText: string;
 }
 
-type ProgressEmitter = (
-  phase: WebSearchProgressPhase,
-  message: string,
-  extra?: Partial<WebSearchProgressEvent>
-) => void;
+type ProgressEmitter = (phase: WebSearchProgressPhase, message: string) => void;
 
-export const SEARCH_INSTRUCTIONS =
+const SEARCH_INSTRUCTIONS =
   "You are a web search assistant. Search the web to find accurate, up-to-date information for the user's query. Provide a comprehensive summary with all relevant details, numbers, dates, and sources.";
 
-export const buildSearchInstructions = (
+const buildSearchInstructions = (
   referenceDate: Date | string = new Date()
 ): string => {
   const date =
@@ -150,7 +137,7 @@ const isTokenCount = (value: number | undefined): value is number =>
 
 const toUsage = (
   raw: ResponsesUsagePayload | undefined,
-  model: Model<Api> | undefined
+  model: Model<Api>
 ): Usage | undefined => {
   if (!raw) {
     return undefined;
@@ -187,9 +174,7 @@ const toUsage = (
     totalTokens,
   };
 
-  if (model) {
-    calculateCost(model, usage);
-  }
+  calculateCost(model, usage);
 
   return usage;
 };
@@ -305,10 +290,7 @@ const handleTextEvent = (
         state.lastDeltaUpdateTime = now;
         emit(
           "generating",
-          `Summarizing results (${state.streamedText.length} chars)...`,
-          {
-            chars: state.streamedText.length,
-          }
+          `Summarizing results (${state.streamedText.length} chars)...`
         );
       }
     }
@@ -354,9 +336,7 @@ const handleItemEvent = (
     state.lastPhase !== "searching"
   ) {
     state.lastPhase = "searching";
-    emit("searching", `Searching the web for ${searchQuery}...`, {
-      searchQuery,
-    });
+    emit("searching", `Searching the web for ${searchQuery}...`);
   }
 
   const text = messageTextFromItem(payload.item);
@@ -442,42 +422,23 @@ export const runWebSearch = async (
     throw new Error("web_search requires a non-empty query");
   }
 
-  // oxlint-disable-next-line anti-slop/no-runtime-typeof -- The typed union is a model id string or a pi-ai Model, and typeof is the intended way to tell them apart.
-  const modelObject = typeof model === "object" ? model : undefined;
-
-  const modelId = modelObject ? modelObject.id : String(model).trim();
-
-  if (!modelId) {
-    throw new Error("web_search requires a model");
-  }
+  const modelId = model.id;
 
   signal?.throwIfAborted();
 
-  const startTime = Date.now();
-
-  const emit: ProgressEmitter = (phase, message, extra = {}) => {
-    onProgress?.({
-      message,
-      model: modelId,
-      phase,
-      query: trimmedQuery,
-      type: phase,
-      ...extra,
-    });
+  const emit: ProgressEmitter = (phase, message) => {
+    onProgress?.({ message, phase });
   };
 
   emit("starting", `Starting web search (${modelId})...`);
 
-  const baseHeaders = {
+  const headers = {
     accept: "text/event-stream",
+    authorization: `Bearer ${apiKey}`,
     "content-type": "application/json",
   };
 
-  const headers = apiKey
-    ? { ...baseHeaders, authorization: `Bearer ${apiKey}` }
-    : baseHeaders;
-
-  const response = await fetchFn(resolveResponsesEndpoint(responsesUrl), {
+  const response = await fetchFn(responsesUrl, {
     body: JSON.stringify({
       // CLIProxyAPI drops action.sources unless the client asks for them.
       include: ["web_search_call.action.sources"],
@@ -541,7 +502,7 @@ export const runWebSearch = async (
     throw new Error("Web search completed without any search result text");
   }
 
-  const usage = toUsage(state.rawUsage, modelObject);
+  const usage = toUsage(state.rawUsage, model);
   const sourceList: WebSearchSource[] = [];
 
   for (const [url, title] of state.sources) {
@@ -554,10 +515,7 @@ export const runWebSearch = async (
     sourceList.push(source);
   }
 
-  emit("done", "Web search complete.", {
-    durationMs: Date.now() - startTime,
-    sourcesCount: sourceList.length,
-  });
+  emit("done", "Web search complete.");
 
   const result: WebSearchResult = { answer, sources: sourceList };
 

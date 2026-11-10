@@ -6,29 +6,30 @@ import type {
   Theme,
   ThemeColor,
 } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
-import type { Static } from "typebox";
 import { Value } from "typebox/value";
 
-import { loadAutoCompactEnabled } from "./config.ts";
+import type { Settings } from "./config.ts";
 import type { FastModeController } from "./fast.ts";
-import type { Paint, UsageSegment } from "./footer-render.ts";
+import type { Paint, StatPart, UsageSegment } from "./footer-render.ts";
 import {
   contextSegment,
   formatAccountRows,
   formatCwd,
+  formatRow1,
   formatTokens,
 } from "./footer-render.ts";
 import type { PauseController } from "./pause.ts";
+import { ELAPSED_STATUS_KEY, USAGE_STATUS_KEY } from "./status-keys.ts";
 
 const PATCH = Symbol.for("cliproxyapi-provider/fast-footer");
-const REFRESH_KEY = "cliproxyapi-fast-refresh";
+
+/** Clearing a status makes pi render the stock footer again. */
+const RERENDER_KEY = "cliproxyapi-fast-refresh";
 const ORANGE_TRUECOLOR = "\u001B[38;2;255;165;0m";
 const ORANGE_256 = "\u001B[38;5;214m";
 const FG_RESET = "\u001B[39m";
-const USAGE_KEY = "cliproxyapi-usage";
-const TPS_KEY = "tps";
 
 /** The part of pi's private footer session this patch reads. Checked on every render, because pi may change it. */
 const FooterSessionSchema = Type.Object({
@@ -44,9 +45,10 @@ const FooterSessionSchema = Type.Object({
   }),
 });
 
-type MutableModel = NonNullable<
-  Static<typeof FooterSessionSchema>["state"]["model"]
->;
+interface ModelRef {
+  id: string;
+  provider: string;
+}
 
 interface PatchState {
   controllers: Set<FooterController>;
@@ -56,31 +58,27 @@ interface PatchState {
 
 type PatchableFooter = FooterComponent & { [PATCH]?: PatchState };
 
-export const formatFastModelStatus = (
-  modelName: string,
-  reasoning: boolean,
-  thinkingLevel: string,
-  fast: boolean,
-  fastLabel = "fast",
-  paused = false,
-  pausedLabel = "paused"
-): string => {
-  let status = modelName;
-
-  if (reasoning) {
-    status +=
-      thinkingLevel === "off" ? " • thinking off" : ` • ${thinkingLevel}`;
+const thinkingText = (reasoning: boolean, level: string): string => {
+  if (!reasoning) {
+    return "";
   }
 
-  if (fast) {
-    status += ` • ${fastLabel}`;
+  return level === "off" ? " • thinking off" : ` • ${level}`;
+};
+
+const fastWord = (theme: Theme | undefined): string =>
+  theme?.fg("warning", "fast") ?? "fast";
+
+/** pi's themes have no orange, so paused uses its own color. */
+const pausedWord = (theme: Theme | undefined): string => {
+  if (!theme) {
+    return "paused";
   }
 
-  if (paused) {
-    status += ` • ${pausedLabel}`;
-  }
+  const color =
+    theme.getColorMode() === "truecolor" ? ORANGE_TRUECOLOR : ORANGE_256;
 
-  return status;
+  return `${color}paused${FG_RESET}`;
 };
 
 const install = (controller: FooterController): void => {
@@ -159,12 +157,8 @@ const uninstall = (controller: FooterController): void => {
 };
 
 export interface FooterControllerOptions {
-  /** Read fresh on each session_start, so a config edit applies to the next session. */
-  enabled: () => boolean;
-  agentDir: string;
+  settings: Settings;
   getSegments: (ctx: ExtensionContext) => UsageSegment[];
-  /** Defaults to reading settings.json in agentDir. */
-  autoCompact?: () => boolean;
 }
 
 interface UsageTotals {
@@ -185,14 +179,8 @@ interface StatsCache {
   totals: UsageTotals;
 }
 
-interface StatPart {
-  droppable?: "CH" | "W" | "R" | "cost";
-  text: string;
-}
-
 /** Adapts pi's Theme to the renderer's Paint. Pi only accepts its ThemeColor union, never a plain string. */
-export const themePaint = (theme: Theme): Paint => ({
-  bold: (text) => theme.bold(text),
+const themePaint = (theme: Theme): Paint => ({
   // SAFETY: Paint color strings come only from this extension's fixed color names, each a valid ThemeColor.
   fg: (color, text) => theme.fg(color as ThemeColor, text),
 });
@@ -234,7 +222,8 @@ export class FooterController {
 
       this.activeContext = ctx;
 
-      if (this.options.enabled()) {
+      // Read on each session_start, so a config edit applies to the next session.
+      if (this.options.settings.config().footer ?? true) {
         this.owned = true;
         ctx.ui.setFooter((tui, theme, footerData) => {
           this.tuiHandle = tui;
@@ -285,11 +274,11 @@ export class FooterController {
     });
   }
 
-  isProviderModel(model: MutableModel): boolean {
+  isProviderModel(model: ModelRef): boolean {
     return model.provider === this.providerId;
   }
 
-  isEffectiveFor(model: MutableModel): boolean {
+  isEffectiveFor(model: ModelRef): boolean {
     return this.isProviderModel(model) && this.fast.isEffectiveFor(model.id);
   }
 
@@ -303,22 +292,18 @@ export class FooterController {
     thinkingLevel: string,
     fast: boolean
   ): string {
-    const theme = this.activeContext?.ui.theme;
+    return [
+      modelName + thinkingText(reasoning, thinkingLevel),
+      ...this.modeWords(fast, this.activeContext?.ui.theme),
+    ].join(" • ");
+  }
 
-    const color =
-      theme?.getColorMode?.() === "truecolor" ? ORANGE_TRUECOLOR : ORANGE_256;
-
-    const pausedLabel = theme ? `${color}paused${FG_RESET}` : "paused";
-
-    return formatFastModelStatus(
-      modelName,
-      reasoning,
-      thinkingLevel,
-      fast,
-      theme?.fg("warning", "fast") ?? "fast",
-      this.pause.isEnabled(),
-      pausedLabel
-    );
+  /** The words that say what the next request does differently. Both footers show them. */
+  private modeWords(fast: boolean, theme: Theme | undefined): string[] {
+    return [
+      ...(fast ? [fastWord(theme)] : []),
+      ...(this.isPaused() ? [pausedWord(theme)] : []),
+    ];
   }
 
   refresh(ctx: ExtensionContext): void {
@@ -334,13 +319,7 @@ export class FooterController {
       return;
     }
 
-    ctx.ui.setStatus(REFRESH_KEY, undefined);
-  }
-
-  private autoCompact(): boolean {
-    return this.options.autoCompact
-      ? this.options.autoCompact()
-      : loadAutoCompactEnabled(this.options.agentDir);
+    ctx.ui.setStatus(RERENDER_KEY, undefined);
   }
 
   private scanStats(ctx: ExtensionContext): StatsCache {
@@ -486,88 +465,6 @@ export class FooterController {
     return parts;
   }
 
-  /** Exported for the narrow-width row 1 test. */
-  static assembleRow1(
-    cwdPart: string,
-    statParts: StatPart[],
-    contextPart: string,
-    right: string,
-    rightWithoutProvider: string,
-    paint: Paint,
-    width: number,
-    shrinkRight: (text: string, available: number) => string = (
-      text,
-      available
-    ) => truncateToWidth(text, available, "")
-  ): string {
-    let cwd = cwdPart;
-
-    const buildLeft = (): string =>
-      [cwd, ...statParts.map((part) => part.text), contextPart].join(" ");
-
-    let left = buildLeft();
-
-    const fits = (): boolean =>
-      visibleWidth(left) + 2 + visibleWidth(right) <= width;
-
-    if (!fits()) {
-      for (const key of ["CH", "W", "R", "cost"] as const) {
-        const index = statParts.findIndex((part) => part.droppable === key);
-
-        if (index !== -1) {
-          statParts.splice(index, 1);
-          left = buildLeft();
-        }
-
-        if (fits()) {
-          break;
-        }
-      }
-    }
-
-    if (!fits()) {
-      const excess = visibleWidth(left) + 2 + visibleWidth(right) - width;
-      cwd = truncateToWidth(
-        cwd,
-        Math.max(0, visibleWidth(cwd) - excess),
-        paint.fg("dim", "...")
-      );
-      left = buildLeft();
-    }
-
-    // Pi drops the provider prefix before it truncates the model name.
-    let rightPart = right;
-
-    if (!fits()) {
-      rightPart = rightWithoutProvider;
-    }
-
-    const fitsWithoutProvider = (): boolean =>
-      visibleWidth(left) + 2 + visibleWidth(rightPart) <= width;
-
-    if (!fitsWithoutProvider()) {
-      const available = width - visibleWidth(left) - 2;
-      rightPart =
-        available > 0 ? shrinkRight(rightWithoutProvider, available) : "";
-    }
-
-    const leftWidth = visibleWidth(left);
-    const rightWidth = visibleWidth(rightPart);
-    let padding = "";
-
-    if (rightPart && leftWidth + rightWidth < width) {
-      padding = " ".repeat(width - leftWidth - rightWidth);
-    } else if (rightPart) {
-      padding = "  ";
-    }
-
-    return truncateToWidth(
-      left + padding + rightPart,
-      width,
-      paint.fg("dim", "...")
-    );
-  }
-
   private renderOwned(
     ctx: ExtensionContext,
     paint: Paint,
@@ -593,7 +490,7 @@ export class FooterController {
     const contextPart = contextSegment(
       contextUsage?.percent ?? null,
       contextUsage?.contextWindow ?? model?.contextWindow ?? 0,
-      this.autoCompact(),
+      this.options.settings.autoCompact(),
       paint
     );
 
@@ -603,15 +500,12 @@ export class FooterController {
     const cwdPart =
       paint.fg(
         "dim",
-        formatCwd(
-          ctx.sessionManager.getCwd(),
-          process.env.HOME || process.env.USERPROFILE
-        )
+        formatCwd(ctx.sessionManager.getCwd(), this.options.settings.home())
       ) +
       (branch ? paint.fg("accent", ` (${branch})`) : "") +
       (sessionName ? paint.fg("dim", ` • ${sessionName}`) : "");
 
-    const row1 = FooterController.assembleRow1(
+    const row1 = formatRow1(
       cwdPart,
       statParts,
       contextPart,
@@ -624,7 +518,7 @@ export class FooterController {
     );
 
     const statuses = footerData.getExtensionStatuses();
-    const elapsed = statuses.get(TPS_KEY);
+    const elapsed = statuses.get(ELAPSED_STATUS_KEY);
     const rows = [row1];
 
     rows.push(
@@ -638,9 +532,7 @@ export class FooterController {
     );
 
     const others = [...statuses.entries()]
-      .filter(
-        ([key]) => key !== USAGE_KEY && key !== REFRESH_KEY && key !== TPS_KEY
-      )
+      .filter(([key]) => key !== USAGE_STATUS_KEY && key !== ELAPSED_STATUS_KEY)
       .toSorted(([a], [b]) => a.localeCompare(b))
       .flatMap(([, text]) => {
         const sanitized = sanitizeStatusText(text);
@@ -666,13 +558,10 @@ export class FooterController {
   ): string {
     const { theme } = ctx.ui;
     const { model } = ctx;
-    const modelName = model?.id || "no-model";
-    let base = modelName;
 
-    if (model?.reasoning) {
-      const level = ctx.thinkingLevel ?? "off";
-      base += level === "off" ? " • thinking off" : ` • ${level}`;
-    }
+    let base =
+      (model?.id || "no-model") +
+      thinkingText(model?.reasoning ?? false, ctx.thinkingLevel ?? "off");
 
     // Keep fast and paused when the model name must shrink; they change what the next request does.
     if (maxBaseWidth !== undefined) {
@@ -686,22 +575,10 @@ export class FooterController {
 
     right += paint.fg("dim", base);
 
-    if (
-      model &&
-      this.isEffectiveFor({
-        id: model.id,
-        provider: model.provider,
-        reasoning: model.reasoning,
-      })
-    ) {
-      right += paint.fg("dim", " • ") + theme.fg("warning", "fast");
-    }
+    const fast = model !== undefined && this.isEffectiveFor(model);
 
-    if (this.isPaused()) {
-      const color =
-        theme.getColorMode() === "truecolor" ? ORANGE_TRUECOLOR : ORANGE_256;
-
-      right += `${paint.fg("dim", " • ")}${color}paused${FG_RESET}`;
+    for (const word of this.modeWords(fast, theme)) {
+      right += paint.fg("dim", " • ") + word;
     }
 
     return right;
