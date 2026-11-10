@@ -3,11 +3,9 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { Type } from "typebox";
 
+import { listCredentials } from "./credentials.ts";
 import { ManagementHttpError, managementRequest } from "./management.ts";
 import type { ManagementRequestOptions } from "./management.ts";
-
-/** Shared options for the CLIProxyAPI v8 management OAuth flow. */
-export type OAuthRequestOptions = ManagementRequestOptions;
 
 export interface Account {
   authIndex: string;
@@ -17,13 +15,9 @@ export interface Account {
   disabled: boolean;
 }
 
-export interface StartOAuthOptions extends OAuthRequestOptions {
+export interface StartOAuthOptions extends ManagementRequestOptions {
   authIndex?: string;
-  /**
-   * CLIProxyAPI provider id: `claude`, `codex`, `antigravity`, `kimi`,
-   * `kimi-ai`, `xai`, `devin`, `meta`, or a registered plugin provider id.
-   * Any other non-empty id is passed through for the server to judge.
-   */
+  /** A CLIProxyAPI provider id, such as one in LOGIN_PROVIDERS. The server judges any other id. */
   provider: string;
 }
 
@@ -37,7 +31,7 @@ export interface OAuthStart {
   userCode?: string;
 }
 
-export interface SubmitOAuthCallbackOptions extends OAuthRequestOptions {
+export interface SubmitOAuthCallbackOptions extends ManagementRequestOptions {
   provider?: string;
   /** The complete callback URL the browser landed on, with its code and state. */
   redirectUrl?: string;
@@ -46,11 +40,9 @@ export interface SubmitOAuthCallbackOptions extends OAuthRequestOptions {
   error?: string;
 }
 
-export interface PollOAuthStatusOptions extends OAuthRequestOptions {
+export interface PollOAuthStatusOptions extends ManagementRequestOptions {
   state: string;
-  /** Delay between status checks while the login is pending. */
   pollIntervalMs?: number;
-  /** Longest total wait before the pending login counts as failed. */
   maxWaitMs?: number;
 }
 
@@ -86,19 +78,6 @@ const RefreshSchema = Type.Object({
   ok: Type.Boolean(),
 });
 
-const AccountsSchema = Type.Object({
-  files: Type.Array(
-    Type.Object({
-      auth_index: Type.String(),
-      disabled: Type.Optional(Type.Boolean()),
-      email: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-      label: Type.Optional(Type.Union([Type.String(), Type.Null()])),
-      name: Type.String(),
-      provider: Type.String(),
-    })
-  ),
-});
-
 const nonEmpty = (value: string | undefined, name: string): string => {
   const trimmed = value?.trim() ?? "";
 
@@ -110,7 +89,7 @@ const nonEmpty = (value: string | undefined, name: string): string => {
 };
 
 export const refreshServerCatalog = async (
-  options: OAuthRequestOptions
+  options: ManagementRequestOptions
 ): Promise<boolean> => {
   try {
     await managementRequest(options, "/models/refresh", RefreshSchema, {
@@ -128,15 +107,11 @@ export const refreshServerCatalog = async (
 };
 
 export const listAccounts = async (
-  options: OAuthRequestOptions
+  options: ManagementRequestOptions
 ): Promise<Account[]> => {
-  const result = await managementRequest(
-    options,
-    "/credentials",
-    AccountsSchema
-  );
+  const files = await listCredentials(options);
 
-  return result.files.map((file) => ({
+  return files.map((file) => ({
     authIndex: file.auth_index,
     disabled: file.disabled ?? false,
     label: file.label || file.email || file.name,

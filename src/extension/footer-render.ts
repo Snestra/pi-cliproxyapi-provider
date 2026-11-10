@@ -2,13 +2,15 @@ import path from "node:path";
 
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 
-/** One account or model as the footer shows it. The tracker builds these, the renderer paints them. */
+import { DAY_MS, HOUR_MS, MINUTE_MS } from "../core/time.ts";
+import type { UsageWindow } from "../core/usage.ts";
+
 export type UsageSegment =
   | {
       kind: "windows";
       name: string;
       current: boolean;
-      windows: { label: string; usedPercent: number; resetAt?: number }[];
+      windows: UsageWindow[];
     }
   | { kind: "out"; name: string; current: boolean; until: number }
   | { kind: "unknown"; name: string; current: boolean }
@@ -17,7 +19,6 @@ export type UsageSegment =
 /** The slice of pi's Theme the renderer needs. Pi's Theme satisfies this structurally. */
 export interface Paint {
   fg: (color: string, text: string) => string;
-  bold: (text: string) => string;
 }
 
 const FULL = "█";
@@ -25,9 +26,6 @@ const TRACK = "░";
 const PARTIALS = "▏▎▍▌▋▊▉";
 const EIGHTHS = 8;
 const SAME_DAY_MS = 20 * 60 * 60_000;
-const MINUTE_MS = 60_000;
-const HOUR_MS = 60 * MINUTE_MS;
-const DAY_MS = 24 * HOUR_MS;
 
 const LEFT_INDICATORS = { error: "🔴", warning: "🟡" } as const;
 
@@ -42,7 +40,6 @@ export const severity = (left: number): "error" | "warning" | undefined => {
   return left <= 25 ? "warning" : undefined;
 };
 
-/** A bar of `cells` blocks, filled by rounded eighths, with a dim track. */
 export const bar = (
   percent: number,
   cells: number,
@@ -64,7 +61,6 @@ export const bar = (
   return paintedFill + paintedTrack;
 };
 
-/** The coarsest single unit until a reset. Empty when the reset has passed, so callers skip it. */
 export const countdown = (resetAt: number, now: number): string => {
   if (resetAt <= now) {
     return "";
@@ -83,7 +79,6 @@ export const countdown = (resetAt: number, now: number): string => {
   return `↺${Math.floor(diff / DAY_MS)}d`;
 };
 
-/** A clock time, with the weekday once the time is at least 20 hours away. */
 export const outUntil = (until: number, now: number): string => {
   const options: Intl.DateTimeFormatOptions =
     until - now < SAME_DAY_MS
@@ -205,7 +200,6 @@ const isImportant = (segment: UsageSegment): boolean => {
   return segment.current;
 };
 
-/** Whole segments greedily packed into at most two rows. Undefined when a segment or the pack exceeds them. */
 const wrapSegments = (
   parts: readonly string[],
   paint: Paint,
@@ -361,6 +355,90 @@ export const formatAccountRows = (
   return rows.map((row) => truncateToWidth(row, width, paint.fg("dim", "...")));
 };
 
+export interface StatPart {
+  droppable?: "CH" | "W" | "R" | "cost";
+  text: string;
+}
+
+/** Row 1 of the owned footer. Stats drop, then the cwd shrinks, then the model part, the way pi's footer gives way. */
+export const formatRow1 = (
+  cwdPart: string,
+  statParts: StatPart[],
+  contextPart: string,
+  right: string,
+  rightWithoutProvider: string,
+  paint: Paint,
+  width: number,
+  shrinkRight: (text: string, available: number) => string
+): string => {
+  let cwd = cwdPart;
+
+  const buildLeft = (): string =>
+    [cwd, ...statParts.map((part) => part.text), contextPart].join(" ");
+
+  let left = buildLeft();
+
+  const fits = (): boolean =>
+    visibleWidth(left) + 2 + visibleWidth(right) <= width;
+
+  if (!fits()) {
+    for (const key of ["CH", "W", "R", "cost"] as const) {
+      const index = statParts.findIndex((part) => part.droppable === key);
+
+      if (index !== -1) {
+        statParts.splice(index, 1);
+        left = buildLeft();
+      }
+
+      if (fits()) {
+        break;
+      }
+    }
+  }
+
+  if (!fits()) {
+    const excess = visibleWidth(left) + 2 + visibleWidth(right) - width;
+    cwd = truncateToWidth(
+      cwd,
+      Math.max(0, visibleWidth(cwd) - excess),
+      paint.fg("dim", "...")
+    );
+    left = buildLeft();
+  }
+
+  // Pi drops the provider prefix before it truncates the model name.
+  let rightPart = right;
+
+  if (!fits()) {
+    rightPart = rightWithoutProvider;
+  }
+
+  const fitsWithoutProvider = (): boolean =>
+    visibleWidth(left) + 2 + visibleWidth(rightPart) <= width;
+
+  if (!fitsWithoutProvider()) {
+    const available = width - visibleWidth(left) - 2;
+    rightPart =
+      available > 0 ? shrinkRight(rightWithoutProvider, available) : "";
+  }
+
+  const leftWidth = visibleWidth(left);
+  const rightWidth = visibleWidth(rightPart);
+  let padding = "";
+
+  if (rightPart && leftWidth + rightWidth < width) {
+    padding = " ".repeat(width - leftWidth - rightWidth);
+  } else if (rightPart) {
+    padding = "  ";
+  }
+
+  return truncateToWidth(
+    left + padding + rightPart,
+    width,
+    paint.fg("dim", "...")
+  );
+};
+
 /** Pi's token thresholds: 999, 1.0k under 10k, 999k, 1.0M under 10M, then whole millions. */
 export const formatTokens = (count: number): string => {
   if (count < 1000) {
@@ -403,7 +481,6 @@ export const formatCwd = (cwd: string, home: string | undefined): string => {
   return relativeToHome === "" ? "~" : `~${path.sep}${relativeToHome}`;
 };
 
-/** The context part of row 1: a 10-cell bar, the percent, and the window size. */
 export const contextSegment = (
   percent: number | null,
   contextWindow: number,

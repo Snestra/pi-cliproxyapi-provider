@@ -5,7 +5,6 @@ export type AutocompleteItem = NonNullable<
   Awaited<ReturnType<NonNullable<RegisteredCommand["getArgumentCompletions"]>>>
 >[number];
 
-/** Completes a command argument from `values` by case-insensitive prefix, or `null` when nothing matches. */
 export const completeFrom = (
   values: readonly string[],
   prefix: string

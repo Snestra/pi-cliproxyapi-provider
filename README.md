@@ -88,7 +88,7 @@ The fields work as follows:
 
 ## Use the model mapping outside pi
 
-The files in `src/core` don't import `pi-coding-agent`, and they don't read files or environment variables on their own. Programs built on `pi-ai` can import them to load the catalog, pick an API per model, and build a provider. The list of exported functions is at the top of `src/core/index.ts`.
+The files in `src/core` don't import `pi-coding-agent`, and they don't read files or environment variables on their own. Programs built on `pi-ai` can import them to load the catalog, pick an API per model, and build a provider. `src/core/provider.ts` builds the provider, `src/core/connection.ts` resolves the address and key, and `src/core/catalog.ts` maps the catalog.
 
 ## Development
 

@@ -1,47 +1,48 @@
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
 
+import { activeCredentials, servedModels } from "./credentials.ts";
+import type { Credential, Signals } from "./credentials.ts";
 import { managementRequest, parseJson } from "./management.ts";
+import type { ManagementRequestOptions } from "./management.ts";
+import { MINUTE_MS, SECOND_MS } from "./time.ts";
+import { footerName, usageSource } from "./upstreams.ts";
 
-/** One rate-limit window of an upstream account, such as Claude's five hours. */
-export interface UsageWindow {
-  label: string;
-  usedPercent: number;
-  /** Epoch milliseconds. */
-  resetAt?: number;
-}
+/** One rate-limit window of an upstream account, such as Claude's five hours. Times are epoch milliseconds. */
+const UsageWindowSchema = Type.Object({
+  label: Type.String(),
+  resetAt: Type.Optional(Type.Number()),
+  usedPercent: Type.Number(),
+});
 
-/** Usage of one CLIProxyAPI credential, the upstream account behind some models. */
-export interface ProviderUsage {
-  /** CLIProxyAPI's provider id, such as `claude` or `kimi-ai`. */
-  provider: string;
-  /** Short name for a footer. */
-  name: string;
-  models: string[];
-  windows: UsageWindow[];
-  /** Epoch milliseconds until which the account can't serve requests. */
-  exhaustedUntil?: number;
-  /** Epoch milliseconds when the server recorded the quota signals behind these windows, when it reports one. */
-  observedAt?: number;
-}
+export type UsageWindow = Static<typeof UsageWindowSchema>;
 
-export interface UsageFetchOptions {
-  baseUrl: string;
-  /** The CLIProxyAPI management key, not the client API key. */
-  managementKey: string;
-  fetch?: typeof globalThis.fetch;
-  signal?: AbortSignal;
-  timeoutMs?: number;
+/**
+ * Usage of one CLIProxyAPI credential, the upstream account behind some
+ * models. `provider` is CLIProxyAPI's id, such as `kimi-ai`; `name` is
+ * the footer's. `observedAt` is when the server recorded the quota signals
+ * behind the windows, when it reports one. Times are epoch milliseconds.
+ */
+export const ProviderUsageSchema = Type.Object({
+  exhaustedUntil: Type.Optional(Type.Number()),
+  models: Type.Array(Type.String()),
+  name: Type.String(),
+  observedAt: Type.Optional(Type.Number()),
+  provider: Type.String(),
+  windows: Type.Array(UsageWindowSchema),
+});
+
+export type ProviderUsage = Static<typeof ProviderUsageSchema>;
+
+export interface UsageFetchOptions extends ManagementRequestOptions {
   now?: number;
 }
 
-export interface ResetCooldownsOptions extends UsageFetchOptions {
+export interface ResetCooldownsOptions extends ManagementRequestOptions {
   /** Reset only the credentials that serve this model. Omit to reset every credential. */
   modelId?: string;
 }
 
-const SECOND_MS = 1000;
-const MINUTE_MS = 60 * SECOND_MS;
 const FULL_PERCENT = 100;
 
 /** Wait this long when a quota error names no reset time and nothing else knows it. */
@@ -59,7 +60,6 @@ const COOLDOWN_SECONDS = /"reset_seconds"\s*:\s*(?<seconds>\d+)/u;
 const COOLDOWN_AFTER =
   /\(reset after (?=\d)(?:(?<hours>\d+)h)?(?:(?<minutes>\d+)m)?(?:(?<seconds>\d+)s)?\)/u;
 
-/** Parses a number or numeric string. Undefined for anything else, including NaN. */
 const finite = (value: string | number | undefined): number | undefined => {
   if (value === undefined || value === "") {
     return undefined;
@@ -70,7 +70,6 @@ const finite = (value: string | number | undefined): number | undefined => {
   return Number.isFinite(parsed) ? parsed : undefined;
 };
 
-/** Parses an ISO time to epoch milliseconds. */
 const isoTime = (value: string | undefined): number | undefined => {
   const parsed = value === undefined ? Number.NaN : Date.parse(value);
 
@@ -133,39 +132,6 @@ export const quotaResetFromError = (
     candidates.find((time) => time !== undefined && time > now) ?? fallbackAt
   );
 };
-
-const SignalsSchema = Type.Record(
-  Type.String(),
-  Type.Union([Type.String(), Type.Number()])
-);
-
-type Signals = Static<typeof SignalsSchema>;
-
-const CredentialSchema = Type.Object({
-  auth_index: Type.String(),
-  disabled: Type.Optional(Type.Boolean()),
-  name: Type.String(),
-  next_retry_after: Type.Optional(Type.String()),
-  provider: Type.String(),
-  quota: Type.Optional(
-    Type.Object({
-      observed_at: Type.Optional(Type.String()),
-      signals: Type.Optional(SignalsSchema),
-    })
-  ),
-  quota_plugin_id: Type.Optional(Type.String()),
-  unavailable: Type.Optional(Type.Boolean()),
-});
-
-type Credential = Static<typeof CredentialSchema>;
-
-const CredentialsSchema = Type.Object({
-  files: Type.Array(CredentialSchema),
-});
-
-const CredentialModelsSchema = Type.Object({
-  models: Type.Array(Type.Object({ id: Type.String() })),
-});
 
 const CooldownResetSchema = Type.Object({
   auth_index: Type.String(),
@@ -232,17 +198,6 @@ const PluginQuotaSchema = Type.Object({
 
 type PluginQuota = Static<typeof PluginQuotaSchema>;
 
-const FOOTER_NAMES = new Map([
-  ["antigravity", "antigravity"],
-  ["claude", "claude"],
-  ["codex", "codex"],
-  ["devin", "devin"],
-  ["gemini", "gemini"],
-  ["kimi-ai", "kimi"],
-  ["meta", "muse"],
-  ["xai", "grok"],
-]);
-
 const KIMI_WINDOWS = [
   ["limit_5h", "5h"],
   ["limit_month_total", "mo"],
@@ -263,7 +218,7 @@ const KIMI_AI = /kimi-ai|kimi\.ai/iu;
 /** CLIProxyAPI swaps this placeholder for the credential's own access token. */
 const TOKEN_HEADER = { Authorization: "Bearer $TOKEN$" } as const;
 
-export const windowLabel = (minutes: number): string => {
+const windowLabel = (minutes: number): string => {
   const day = 24 * 60;
 
   if (minutes >= day && minutes % day === 0) {
@@ -404,7 +359,6 @@ const devinWindows = (signals: Signals): UsageWindow[] => {
   return windows;
 };
 
-/** Windows from a quota plugin's normalized groups and buckets. */
 const pluginWindows = (body: PluginQuota | undefined): UsageWindow[] => {
   const windows: UsageWindow[] = [];
 
@@ -479,7 +433,6 @@ const xaiWindows = (body: XaiBilling | undefined): UsageWindow[] => {
   ];
 };
 
-/** Latest reset of the windows that are full. Undefined when none is full. */
 const fullUntil = (windows: readonly UsageWindow[]): number | undefined => {
   let until: number | undefined;
 
@@ -491,6 +444,11 @@ const fullUntil = (windows: readonly UsageWindow[]): number | undefined => {
 
   return until;
 };
+
+interface Observed {
+  windows: UsageWindow[];
+  observedAt?: number;
+}
 
 export const fetchUsage = async (
   options: UsageFetchOptions
@@ -524,80 +482,97 @@ export const fetchUsage = async (
       : undefined;
   };
 
-  const windowsFor = async (credential: Credential): Promise<UsageWindow[]> => {
+  const live = (windows: UsageWindow[]): Observed => ({
+    observedAt: now,
+    windows,
+  });
+
+  /** Signal windows carry the server's observation time. Every other source is fetched live, so it is observed now. */
+  const windowsFor = async (credential: Credential): Promise<Observed> => {
     const signals = credential.quota?.signals ?? {};
+    const recordedAt = isoTime(credential.quota?.observed_at);
 
-    if (credential.provider === "claude") {
-      return claudeWindows(signals);
-    }
+    const recorded = (windows: UsageWindow[]): Observed =>
+      recordedAt === undefined
+        ? { windows }
+        : { observedAt: recordedAt, windows };
 
-    if (credential.provider === "codex") {
-      return codexWindows(
-        signals,
-        isoTime(credential.quota?.observed_at) ?? now
-      );
-    }
-
-    if (credential.provider === "devin") {
-      return devinWindows(signals);
-    }
-
-    if (credential.provider === "xai") {
-      return xaiWindows(
-        await upstream(credential, XAI_BILLING_URL, XaiBillingSchema)
-      );
-    }
-
-    if (credential.provider.startsWith("kimi")) {
-      const url = KIMI_AI.test(`${credential.provider} ${credential.name}`)
+    // A kimi credential whose file names kimi.ai or kimi-ai belongs to the .ai service.
+    const kimiUrl = (source: "kimi-com-usages" | "kimi-ai-usages"): string =>
+      source === "kimi-ai-usages" || KIMI_AI.test(credential.name)
         ? KIMI_AI_USAGE_URL
         : KIMI_USAGE_URL;
 
-      return kimiWindows(await upstream(credential, url, KimiUsageSchema));
+    const source = usageSource(credential.provider);
+
+    switch (source) {
+      case "claude-signals": {
+        return recorded(claudeWindows(signals));
+      }
+
+      case "codex-signals": {
+        return recorded(codexWindows(signals, recordedAt ?? now));
+      }
+
+      case "devin-signals": {
+        return recorded(devinWindows(signals));
+      }
+
+      case "xai-billing": {
+        return live(
+          xaiWindows(
+            await upstream(credential, XAI_BILLING_URL, XaiBillingSchema)
+          )
+        );
+      }
+
+      case "kimi-com-usages":
+      case "kimi-ai-usages": {
+        return live(
+          kimiWindows(
+            await upstream(credential, kimiUrl(source), KimiUsageSchema)
+          )
+        );
+      }
+
+      default: {
+        break;
+      }
     }
 
     // Providers such as antigravity and gemini record no quota signals, so
     // their windows come from a quota plugin when CLIProxyAPI names one for
     // the credential. Without one there is no recorded format to parse.
     if (credential.quota_plugin_id !== undefined) {
-      return pluginWindows(
-        await managementRequest(
-          options,
-          `/plugins/${encodeURIComponent(credential.quota_plugin_id)}/quota`,
-          PluginQuotaSchema,
-          {
-            body: JSON.stringify({ auth_index: credential.auth_index }),
-            method: "POST",
-          }
+      return live(
+        pluginWindows(
+          await managementRequest(
+            options,
+            `/plugins/${encodeURIComponent(credential.quota_plugin_id)}/quota`,
+            PluginQuotaSchema,
+            {
+              body: JSON.stringify({ auth_index: credential.auth_index }),
+              method: "POST",
+            }
+          )
         )
       );
     }
 
-    // Meta's quota endpoint reports no usage and returns an API key, so it is never called.
-    return [];
+    return recorded([]);
   };
 
-  const { files } = await managementRequest(
-    options,
-    "/credentials",
-    CredentialsSchema
-  );
-
-  const credentials = files.filter((credential) => !credential.disabled);
+  const credentials = await activeCredentials(options);
 
   const accounts = await Promise.all(
     credentials.map(async (credential): Promise<ProviderUsage | undefined> => {
-      const [modelList, windows] = await Promise.all([
-        managementRequest(
-          options,
-          `/credentials/models?name=${encodeURIComponent(credential.name)}`,
-          CredentialModelsSchema
-        ).catch((): null => null),
-        windowsFor(credential).catch((): UsageWindow[] => []),
+      const [models, { observedAt, windows }] = await Promise.all([
+        servedModels(options, credential).catch((): null => null),
+        windowsFor(credential).catch((): Observed => ({ windows: [] })),
       ]);
 
       // One failing account must not empty the footer, so only it is left out.
-      if (!modelList) {
+      if (!models) {
         return undefined;
       }
 
@@ -613,31 +588,11 @@ export const fetchUsage = async (
       const full = fullUntil(windows);
 
       const account: ProviderUsage = {
-        models: modelList.models.map((model) => model.id),
-        name: FOOTER_NAMES.get(credential.provider) ?? credential.provider,
+        models,
+        name: footerName(credential.provider),
         provider: credential.provider,
         windows,
       };
-
-      // Kimi, xAI, and plugin windows were just fetched live, so they are
-      // observed now; only signal-derived windows (Claude, Codex, Devin)
-      // carry the server's recorded observation time. Branch in the same
-      // order as windowsFor: a claude/codex/devin credential that also
-      // names a quota plugin still uses its recorded signals.
-      const signalsBased =
-        credential.provider === "claude" ||
-        credential.provider === "codex" ||
-        credential.provider === "devin";
-
-      const fetchedLive =
-        !signalsBased &&
-        (credential.provider === "xai" ||
-          credential.provider.startsWith("kimi") ||
-          credential.quota_plugin_id !== undefined);
-
-      const observedAt = fetchedLive
-        ? now
-        : isoTime(credential.quota?.observed_at);
 
       if (observedAt !== undefined) {
         account.observedAt = observedAt;
@@ -665,28 +620,13 @@ export const resetCooldowns = async (
   options: ResetCooldownsOptions
 ): Promise<string[]> => {
   const modelId = options.modelId?.trim() || undefined;
-
-  const { files } = await managementRequest(
-    options,
-    "/credentials",
-    CredentialsSchema
-  );
-
-  const credentials = files.filter((credential) => !credential.disabled);
+  const credentials = await activeCredentials(options);
 
   const served = await Promise.all(
-    credentials.map(async (credential) => {
-      const modelList = await managementRequest(
-        options,
-        `/credentials/models?name=${encodeURIComponent(credential.name)}`,
-        CredentialModelsSchema
-      );
-
-      return {
-        credential,
-        models: modelList.models.map((model) => model.id),
-      };
-    })
+    credentials.map(async (credential) => ({
+      credential,
+      models: await servedModels(options, credential),
+    }))
   );
 
   const targets =

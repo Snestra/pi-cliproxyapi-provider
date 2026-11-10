@@ -5,13 +5,13 @@ import type {
   StreamOptions,
 } from "@earendil-works/pi-ai";
 
-import type { ThoughtSummary } from "./catalog.ts";
+import { isCliproxyModel } from "./catalog.ts";
 
 export interface PayloadSettings {
-  apiKey: string;
+  /** Used when a caller streams without pi's auth, which sets its own key. */
+  apiKey?: string;
   /** Read at request time so /fast changes existing sessions immediately. */
   fast?: () => boolean;
-  thoughtSummaries?: Readonly<Record<string, ThoughtSummary>>;
 }
 
 interface RequestPayload {
@@ -38,9 +38,9 @@ const applyPayloadSettings = (
         ? options.thinkingDisplay
         : undefined;
 
-    const configured =
-      settings.thoughtSummaries?.[model.id] ??
-      ("thoughtSummary" in model ? model.thoughtSummary : "omitted");
+    const configured = isCliproxyModel(model)
+      ? model.thoughtSummary
+      : "omitted";
 
     if (explicit === "summarized" || explicit === "omitted") {
       thinking.display = explicit;
@@ -52,16 +52,14 @@ const applyPayloadSettings = (
   }
 
   if (
-    model.api === "openai-responses" &&
     (settings.fast?.() ?? false) &&
-    "supportsFast" in model &&
+    isCliproxyModel(model) &&
     model.supportsFast
   ) {
     payload.service_tier = "priority";
   }
 };
 
-/** Run provider edits first; the caller always sees and can replace the final payload. */
 export const wrapCliproxyStreams = (
   streams: ProviderStreams,
   settings: PayloadSettings

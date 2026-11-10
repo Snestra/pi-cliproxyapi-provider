@@ -4,19 +4,18 @@ import type {
 } from "@earendil-works/pi-ai";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 
+import { modelSegment } from "../core/catalog.ts";
+
 const BUILTIN = new Map(
   getBuiltinModels("anthropic").map((model) => [model.id, model])
 );
 
-/** pi-ai's own Anthropic model, matched on the id or its segment after the last "/". */
 const builtin = (id: string) => {
   const modelId = id.trim().toLowerCase();
-  const segment = modelId.slice(modelId.lastIndexOf("/") + 1);
 
-  return BUILTIN.get(modelId) ?? BUILTIN.get(segment);
+  return BUILTIN.get(modelId) ?? BUILTIN.get(modelSegment(modelId));
 };
 
-/** pi-ai's own Anthropic prompt cache lifetimes. */
 export const anthropicPromptCache = (
   id: string
 ): ModelPromptCache | undefined => {
@@ -25,7 +24,6 @@ export const anthropicPromptCache = (
   return lifetimes ? { ...lifetimes } : undefined;
 };
 
-/** pi-ai's own Anthropic compat flags, such as forceAdaptiveThinking. */
 export const anthropicCompat = (
   id: string
 ): AnthropicMessagesCompat | undefined => {

@@ -26,6 +26,10 @@ const searchModelRank = (modelId: string): number => {
   return 4;
 };
 
+/** Only a catalog that says no rules a model out; unknown support counts. */
+export const canSearch = (model: { supportsWebSearch?: boolean }): boolean =>
+  model.supportsWebSearch !== false;
+
 /** A pi-ai Model fits this shape. */
 export interface SearchCandidate {
   id: string;
@@ -40,21 +44,12 @@ const inputPrice = (candidate: SearchCandidate): number => {
   return input > 0 ? input : Number.POSITIVE_INFINITY;
 };
 
-/**
- * Pick a search model. Models known not to support web search are excluded.
- * The preferred id wins when it is present and not excluded. Otherwise
- * models known to support web search come before models with unknown
- * support. Within each support group, fast GPT models come first, then
- * other GPT models, then Claude Haiku models, then other Claude models,
- * then everything else. Within a group the cheapest priced model wins,
- * and catalog order breaks ties.
- */
-export const selectSearchModel = (
-  models: readonly SearchCandidate[],
+export const selectSearchModel = <T extends SearchCandidate>(
+  models: readonly T[],
   preferred?: string
-): string | undefined => {
+): T | undefined => {
   const candidates = models.filter(
-    (model) => model.id.trim().length > 0 && model.supportsWebSearch !== false
+    (model) => model.id.trim().length > 0 && canSearch(model)
   );
 
   if (candidates.length === 0) {
@@ -69,14 +64,14 @@ export const selectSearchModel = (
     );
 
     if (match) {
-      return match.id;
+      return match;
     }
   }
 
   const ranked = candidates
     .map((model, index) => ({
       index,
-      modelId: model.id,
+      model,
       price: inputPrice(model),
       rank: searchModelRank(model.id),
       supportGroup: model.supportsWebSearch === true ? 0 : 1,
@@ -89,5 +84,5 @@ export const selectSearchModel = (
         a.index - b.index
     );
 
-  return ranked[0]?.modelId;
+  return ranked[0]?.model;
 };

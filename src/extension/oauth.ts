@@ -8,30 +8,18 @@ import {
   pollOAuthStatus,
   startOAuth,
   submitOAuthCallback,
-} from "../core/index.ts";
-import type { Account } from "../core/index.ts";
+} from "../core/oauth.ts";
+import type { Account } from "../core/oauth.ts";
+import { LOGIN_PROVIDERS } from "../core/upstreams.ts";
 import { completeFrom } from "./completions.ts";
-import { MANAGEMENT_KEY_ENV } from "./usage.ts";
-import type { UsageTracker } from "./usage.ts";
+import type { ManagementAccess, Settings } from "./config.ts";
+import { errorText } from "./error-text.ts";
 
 export interface RegisterOAuthLoginOptions {
-  providerId: string;
-  tracker: UsageTracker;
+  settings: Settings;
   /** Refreshes the model catalog the way /cliproxyapi-refresh does. */
   refresh: (ctx: ExtensionContext) => Promise<void>;
 }
-
-/** Built-in CLIProxyAPI login providers. Plugins can add more ids. */
-const LOGIN_PROVIDERS = [
-  "claude",
-  "codex",
-  "antigravity",
-  "kimi",
-  "kimi-ai",
-  "xai",
-  "devin",
-  "meta",
-] as const;
 
 const KNOWN_PROVIDERS = `${LOGIN_PROVIDERS.join(", ")}, or a plugin provider id`;
 
@@ -135,7 +123,7 @@ const refreshAfterLogin = async (
     await options.refresh(ctx);
   } catch (error) {
     ctx.ui.notify(
-      `${signedIn}, but refreshing models failed: ${error instanceof Error ? error.message : String(error)}`,
+      `${signedIn}, but refreshing models failed: ${errorText(error)}`,
       "warning"
     );
 
@@ -145,11 +133,6 @@ const refreshAfterLogin = async (
   ctx.ui.notify(`${signedIn} and refreshed the model catalog.`, "info");
 };
 
-/**
- * Registers /cliproxyapi-login <provider> [account]: starts an upstream account login
- * on the CLIProxyAPI server, asks for the browser's redirect URL, submits
- * it, and waits for the server to finish the credential exchange.
- */
 export const registerOAuthLogin = (
   pi: ExtensionAPI,
   options: RegisterOAuthLoginOptions
@@ -158,23 +141,13 @@ export const registerOAuthLogin = (
     description: `Add an upstream account or sign in again (/cliproxyapi-login <provider> [account]: ${KNOWN_PROVIDERS}).`,
     getArgumentCompletions: (prefix) => completeFrom(LOGIN_PROVIDERS, prefix),
     handler: async (args, ctx) => {
+      let access: ManagementAccess;
+
       // Check the setup first, so the picker never opens for a login that cannot run.
-      if (!options.tracker.hasManagementKey()) {
-        ctx.ui.notify(
-          `CLIProxyAPI management key is not set. Set ${MANAGEMENT_KEY_ENV} or add "managementKey" to cliproxyapi.json, then run /cliproxyapi-login again.`,
-          "error"
-        );
-
-        return;
-      }
-
-      const access = options.tracker.managementAccess();
-
-      if (!access) {
-        ctx.ui.notify(
-          `CLIProxyAPI is not configured. Run /login ${options.providerId} first.`,
-          "error"
-        );
+      try {
+        access = options.settings.requireManagementAccess();
+      } catch (error) {
+        ctx.ui.notify(errorText(error), "error");
 
         return;
       }
@@ -299,7 +272,7 @@ export const registerOAuthLogin = (
         }
 
         ctx.ui.notify(
-          `CLIProxyAPI login for ${provider} failed: ${error instanceof Error ? error.message : String(error)}`,
+          `CLIProxyAPI login for ${provider} failed: ${errorText(error)}`,
           "error"
         );
       }

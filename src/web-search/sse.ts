@@ -3,14 +3,12 @@ export interface SseEvent {
   data: unknown;
 }
 
-export interface SseParser {
+interface SseParser {
   push: (chunk: string) => void;
   end: () => void;
 }
 
-export const createSseParser = (
-  onEvent: (event: SseEvent) => void
-): SseParser => {
+const createSseParser = (onEvent: (event: SseEvent) => void): SseParser => {
   let buffer = "";
   let eventName = "";
   let dataLines: string[] = [];

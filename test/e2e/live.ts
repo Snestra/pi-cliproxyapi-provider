@@ -7,9 +7,9 @@ import path from "node:path";
 import { createModels } from "@earendil-works/pi-ai/models";
 import type { Models } from "@earendil-works/pi-ai/models";
 
-import { createCliproxyProvider } from "../../src/core/index.ts";
-import type { ResolvedConnection } from "../../src/core/index.ts";
-import { resolveExtensionConnection } from "../../src/extension/config.ts";
+import type { ResolvedConnection } from "../../src/core/connection.ts";
+import { createCliproxyProvider } from "../../src/core/provider.ts";
+import { Settings } from "../../src/extension/config.ts";
 
 export const PROJECT_ROOT = path.resolve(import.meta.dirname, "../..");
 export const OUTPUT_DIR = path.join(PROJECT_ROOT, "test-output");
@@ -30,12 +30,7 @@ let cachedConnection: ResolvedConnection | undefined;
 
 /** CLIPROXYAPI_* from the environment, then the user's stored login. */
 export const liveConnection = (): ResolvedConnection => {
-  cachedConnection ??=
-    resolveExtensionConnection({
-      agentDir: USER_AGENT_DIR,
-      env: process.env,
-      providerId: "cliproxyapi",
-    }) ?? undefined;
+  cachedConnection ??= new Settings(USER_AGENT_DIR).connection() ?? undefined;
 
   if (!cachedConnection) {
     throw new Error(

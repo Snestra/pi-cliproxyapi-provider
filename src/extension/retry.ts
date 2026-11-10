@@ -5,7 +5,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 const TRANSIENT_STREAM_ERROR =
   /\bclosed network connection\b|\bstream disconnected before completion: stream closed before response\.completed\b|\binvalid SSE data JSON\b/iu;
 
-export const normalizeTransientNetworkError = (
+const normalizeTransientNetworkError = (
   message: AssistantMessage
 ): AssistantMessage => {
   if (

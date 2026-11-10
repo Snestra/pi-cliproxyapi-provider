@@ -21,8 +21,8 @@ const runChild = async (): Promise<void> => {
 
   const { createModels } = await import("@earendil-works/pi-ai/models");
 
-  const { createCliproxyProvider, resolveConnection } =
-    await import("../../src/core/index.ts");
+  const { createCliproxyProvider } = await import("../../src/core/provider.ts");
+  const { resolveConnection } = await import("../../src/core/connection.ts");
 
   const connection = resolveConnection(process.env);
 

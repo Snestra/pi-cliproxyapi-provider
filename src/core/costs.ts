@@ -23,11 +23,8 @@ export interface CostFetchOptions {
   url?: string;
   signal?: AbortSignal;
   fetch?: typeof globalThis.fetch;
-  /** fetchCosts only: returned instead of an empty catalog when the fetch fails. */
-  fallback?: CostCatalog;
   /** fetchCostsConditional only: sent as If-None-Match, so an unchanged catalog answers 304. */
   etag?: string;
-  /** Defaults to 10 s. */
   timeoutMs?: number;
 }
 
@@ -40,14 +37,12 @@ export type CostFetchResult =
 /** Prices for one catalog id. Null means models.dev has no price for it. */
 export type ResolvedPrice = { standard: ModelCost; fast?: ModelCost } | null;
 
-/** Resolved prices by catalog id. */
 export type ResolvedPrices = Record<string, ResolvedPrice>;
 
 export const DEFAULT_COSTS_URL = "https://models.dev/api.json";
 
 const DEFAULT_COSTS_TIMEOUT_MS = 10_000;
 
-/** Every resolved price is stored under this provider id, so lookups use selectEntry's single-variant branch. */
 const RESOLVED_PROVIDER_ID = "resolved";
 
 export const ZERO_COST = {
@@ -139,10 +134,7 @@ const NetworkErrorSchema = Type.Object({
 });
 
 /** models.dev api.json. Each provider and model is checked on its own, so one odd entry never hides the rest. */
-export const ModelsDevCatalogSchema = Type.Record(
-  Type.String(),
-  Type.Unknown()
-);
+const ModelsDevCatalogSchema = Type.Record(Type.String(), Type.Unknown());
 
 export type ModelsDevCatalog = Static<typeof ModelsDevCatalogSchema>;
 
@@ -242,7 +234,7 @@ const addEntry = (
   index.set(key, entries);
 };
 
-export const parseCosts = (payload: ModelsDevCatalog): CostCatalog => {
+const parseCosts = (payload: ModelsDevCatalog): CostCatalog => {
   const catalog: CostCatalog = { exact: new Map(), normalized: new Map() };
 
   for (const [providerId, provider] of Object.entries(payload)) {
@@ -366,7 +358,6 @@ export const resolvePrices = (
   return Object.fromEntries(ids.map((id) => [id, priceOf(id)]));
 };
 
-/** A catalog that prices exactly the resolved ids. Each id has one entry, so matchModelCost returns it as is. */
 export const costCatalogFromPrices = (prices: ResolvedPrices): CostCatalog => {
   const catalog: CostCatalog = { exact: new Map(), normalized: new Map() };
 
@@ -460,7 +451,7 @@ export const fetchCostsConditional = async (
   }
 };
 
-/** The whole catalog, or `fallback` (empty by default) when models.dev fails. For callers without a price cache. */
+/** The whole catalog, or an empty one when models.dev fails. For callers without a price cache. */
 export const fetchCosts = async (
   options: CostFetchOptions = {}
 ): Promise<CostCatalog> => {
@@ -473,5 +464,5 @@ export const fetchCosts = async (
 
   return result.status === "fresh"
     ? result.costs
-    : (options.fallback ?? { exact: new Map(), normalized: new Map() });
+    : { exact: new Map(), normalized: new Map() };
 };

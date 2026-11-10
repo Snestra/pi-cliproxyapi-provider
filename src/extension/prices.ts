@@ -8,18 +8,15 @@ import {
   DEFAULT_COSTS_URL,
   fetchCostsConditional,
   resolvePrices,
-} from "../core/index.ts";
-import type { CostCatalog } from "../core/index.ts";
+} from "../core/costs.ts";
+import type { CostCatalog } from "../core/costs.ts";
+import { DAY_MS, HOUR_MS, MINUTE_MS } from "../core/time.ts";
 import { readJsonMemo, writeJsonAtomic } from "./files.ts";
 
-export const PRICES_FILE_NAME = "cliproxyapi-prices.json";
+const PRICES_FILE_NAME = "cliproxyapi-prices.json";
 
 /** models.dev prices change rarely, so they are revalidated at most once a day. */
-export const PRICES_TTL_MS = 24 * 60 * 60 * 1000;
-
-const MINUTE_MS = 60_000;
-const HOUR_MS = 60 * MINUTE_MS;
-const DAY_MS = 24 * HOUR_MS;
+const PRICES_TTL_MS = DAY_MS;
 
 const RateFields = {
   cacheRead: Type.Number(),
@@ -56,9 +53,7 @@ type PricesFile = Static<typeof PricesFileSchema>;
 
 export interface PriceCacheOptions {
   agentDir: string;
-  /** Defaults to models.dev's api.json. */
   costsUrl?: string;
-  fetchFn?: typeof fetch;
   now?: () => number;
 }
 
@@ -71,15 +66,12 @@ export interface PriceLoad {
 export interface PriceCacheInfo {
   fetchedAt?: number;
   etag?: string;
-  /** Catalog ids that have a price. */
-  count: number;
 }
 
 const plural = (count: number, unit: string): string =>
   `${count} ${unit}${count === 1 ? "" : "s"}`;
 
-/** "less than a minute", "5 minutes", "25 hours", "3 days". */
-export const formatAge = (ageMs: number): string => {
+const formatAge = (ageMs: number): string => {
   if (ageMs < MINUTE_MS) {
     return "less than a minute";
   }
@@ -104,13 +96,11 @@ export const formatAge = (ageMs: number): string => {
 export class PriceCache {
   private readonly filePath: string;
   private readonly costsUrl: string;
-  private readonly fetchFn: typeof fetch | undefined;
   private readonly now: () => number;
 
   constructor(options: PriceCacheOptions) {
     this.filePath = path.join(options.agentDir, PRICES_FILE_NAME);
     this.costsUrl = options.costsUrl ?? DEFAULT_COSTS_URL;
-    this.fetchFn = options.fetchFn;
     this.now = options.now ?? Date.now;
   }
 
@@ -135,7 +125,6 @@ export class PriceCache {
 
     const result = await fetchCostsConditional({
       etag: revalidating?.etag,
-      fetch: this.fetchFn,
       signal,
       url: this.costsUrl,
     });
@@ -168,14 +157,12 @@ export class PriceCache {
     };
   }
 
-  /** The prices on disk, without any request. Undefined before the first successful load. */
   cached(): CostCatalog | undefined {
     const file = this.read();
 
     return file ? costCatalogFromPrices(file.prices) : undefined;
   }
 
-  /** For /cliproxyapi-status. Undefined before the first successful load. */
   describe(): PriceCacheInfo | undefined {
     const file = this.read();
 
@@ -184,7 +171,6 @@ export class PriceCache {
     }
 
     return {
-      count: Object.values(file.prices).filter(Boolean).length,
       etag: file.etag,
       fetchedAt: file.fetchedAt,
     };

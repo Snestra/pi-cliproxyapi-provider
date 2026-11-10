@@ -10,17 +10,18 @@ import type { AssistantMessage, StreamOptions } from "@earendil-works/pi-ai";
 import { createModels, hasApi } from "@earendil-works/pi-ai/models";
 
 import {
-  createCliproxyProvider,
   fetchCatalog,
-  fetchCosts,
   mapCatalog,
-  matchModelCost,
   mergeCatalog,
+  selectModelApi,
+} from "../../src/core/catalog.ts";
+import type { CatalogModel, ThoughtSummary } from "../../src/core/catalog.ts";
+import {
   resolveConnection,
   resolveEndpoints,
-  selectModelApi,
-} from "../../src/core/index.ts";
-import type { CatalogModel, ThoughtSummary } from "../../src/core/index.ts";
+} from "../../src/core/connection.ts";
+import { fetchCosts, matchModelCost } from "../../src/core/costs.ts";
+import { createCliproxyProvider } from "../../src/core/provider.ts";
 
 const fixture: { models: CatalogModel[] } = JSON.parse(
   await readFile(new URL("fixtures/catalog.json", import.meta.url), "utf-8")
@@ -204,7 +205,7 @@ test("endpoint forms, injected connection precedence and family routing", () => 
   ]) {
     const endpoints = resolveEndpoints(input);
     assert.equal(endpoints.rootUrl, "http://localhost:8317");
-    assert.equal(endpoints.anthropicBaseUrl, endpoints.rootUrl);
+    assert.equal(endpoints.anthropicBaseUrl, "http://localhost:8317");
     assert.equal(endpoints.openaiBaseUrl, "http://localhost:8317/v1");
     assert.equal(
       endpoints.modelsUrl,
@@ -285,7 +286,7 @@ test("catalog fixture maps capabilities, prices, Fast variants, aliases and stal
   });
 
   assert.deepEqual(
-    mapped.models.map((model) => model.id),
+    mapped.map((model) => model.id),
     [
       "claude-haiku-5-5",
       "gpt-6-luna",
@@ -293,7 +294,7 @@ test("catalog fixture maps capabilities, prices, Fast variants, aliases and stal
       "kimi-k3.1-pro",
     ]
   );
-  const [claude, gpt, grok, kimi] = mapped.models;
+  const [claude, gpt, grok, kimi] = mapped;
   assert.equal(claude?.api, "anthropic-messages");
   assert.equal(claude?.baseUrl, proxy.root);
   assert.equal(claude?.thoughtSummary, "omitted");
@@ -324,13 +325,16 @@ test("catalog fixture maps capabilities, prices, Fast variants, aliases and stal
   assert.equal(grok?.cost.input, 2);
   assert.equal(kimi?.contextWindow, 128_000);
   assert.equal(kimi?.maxTokens, 16_384);
-  assert.deepEqual(mapped.fastModelIds, ["gpt-6-luna"]);
+  assert.deepEqual(
+    mapped.filter((model) => model.supportsFast).map((model) => model.id),
+    ["gpt-6-luna"]
+  );
   assert.equal(matchModelCost("unknown-shared", costs).input, 0);
   assert.equal(matchModelCost("anthropic/claude-haiku-5-5", costs).input, 1);
   assert.equal(matchModelCost("gpt-6-luna", costs).input, 3);
   // Resellers list Muse at other prices. The first-party Meta entry must win.
   assert.equal(matchModelCost("muse-spark-1.3", costs).input, 1.25);
-  const first = mergeCatalog([], mapped.models, { now: 100, staleTtlMs: 10 });
+  const first = mergeCatalog([], mapped, { now: 100, staleTtlMs: 10 });
   const missing = mergeCatalog(first, [], { now: 1000, staleTtlMs: 10 });
   assert.equal(missing.length, 4);
   assert.ok(missing.every((model) => model.stale && model.staleSince === 1000));
@@ -343,7 +347,7 @@ test("catalog fixture maps capabilities, prices, Fast variants, aliases and stal
     0
   );
 
-  const restored = mergeCatalog(missing, mapped.models, {
+  const restored = mergeCatalog(missing, mapped, {
     now: 1005,
     staleTtlMs: 10,
   });
@@ -381,7 +385,7 @@ test("real Anthropic stream and streamSimple preserve final payload hooks and ca
       const initial = mapCatalog(entries, {
         baseUrl: proxy.root,
         thoughtSummaries,
-      }).models;
+      });
 
       const provider = createCliproxyProvider({
         apiKey: "test-key",
@@ -530,7 +534,7 @@ test("dynamic provider refresh uses catalog endpoint and Fast hooks chain mutati
     models: mapCatalog([{ id: "other" }], {
       baseUrl: proxy.root,
       families: { "*": "openai-completions" },
-    }).models,
+    }),
   });
 
   models.setProvider(completions);
@@ -559,7 +563,7 @@ test("every family sends pi's session id as a CLIProxyAPI session header", async
     createCliproxyProvider({
       apiKey: "test-key",
       baseUrl: proxy.root,
-      models: mapCatalog(fixture.models, { baseUrl: proxy.root }).models,
+      models: mapCatalog(fixture.models, { baseUrl: proxy.root }),
     })
   );
 
@@ -588,7 +592,7 @@ test("mapCatalog declares prompt cache lifetimes only for Anthropic Messages mod
     ["gpt-6-luna", lifetimes],
   ]);
 
-  const { models } = mapCatalog(fixture.models, {
+  const models = mapCatalog(fixture.models, {
     baseUrl: "https://proxy.test",
     promptCache: (id) => lookup.get(id),
   });

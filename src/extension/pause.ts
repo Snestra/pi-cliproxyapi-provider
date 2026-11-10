@@ -6,7 +6,8 @@ import type {
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 
-import { loadCliproxyConfig, saveCliproxyConfig } from "./config.ts";
+import type { Settings } from "./config.ts";
+import { errorText } from "./error-text.ts";
 
 const POLL_INTERVAL_MS = 200;
 
@@ -59,8 +60,8 @@ export class PauseController {
   }
 }
 
-export const waitForPauseToEnd = async (
-  agentDir: string,
+const waitForPauseToEnd = async (
+  settings: Settings,
   pause: PauseController,
   signal?: AbortSignal
 ): Promise<void> => {
@@ -68,7 +69,7 @@ export const waitForPauseToEnd = async (
     signal?.throwIfAborted();
 
     try {
-      pause.setEnabled(loadCliproxyConfig(agentDir).pause ?? false);
+      pause.setEnabled(settings.config().pause ?? false);
     } catch {
       // Keep the last in-memory setting when the configuration cannot be read.
     }
@@ -83,7 +84,7 @@ export const waitForPauseToEnd = async (
 
 export const registerPause = (
   pi: ExtensionAPI,
-  agentDir: string,
+  settings: Settings,
   pause: PauseController
 ): void => {
   const setPause = (
@@ -98,17 +99,14 @@ export const registerPause = (
     }
 
     try {
-      saveCliproxyConfig(agentDir, { pause: enabled });
+      settings.save({ pause: enabled });
       pause.setEnabled(enabled);
       ctx.ui.notify(
         enabled ? "Requests are paused." : "Requests are continued.",
         "info"
       );
     } catch (error) {
-      ctx.ui.notify(
-        `Failed to save pause mode: ${error instanceof Error ? error.message : String(error)}`,
-        "error"
-      );
+      ctx.ui.notify(`Failed to save pause mode: ${errorText(error)}`, "error");
     }
   };
 
@@ -121,6 +119,6 @@ export const registerPause = (
     handler: (args, ctx) => Promise.resolve(setPause(false, args, ctx)),
   });
   pi.on("before_provider_request", async (_event, ctx) => {
-    await waitForPauseToEnd(agentDir, pause, ctx.signal);
+    await waitForPauseToEnd(settings, pause, ctx.signal);
   });
 };
