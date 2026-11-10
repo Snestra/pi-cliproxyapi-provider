@@ -310,7 +310,7 @@ test("extension connection honors CLIPROXYAPI priority and ignores OPENAI", asyn
   });
 
   assert.equal(connection?.apiKey, "env-key");
-  assert.equal(connection?.rootUrl, "http://env.test");
+  assert.equal(connection?.rootUrl, "https://env.test");
 
   const openAiOnly = resolveExtensionConnection({
     agentDir: agentDir.pathname,
@@ -320,7 +320,7 @@ test("extension connection honors CLIPROXYAPI priority and ignores OPENAI", asyn
   });
 
   assert.equal(openAiOnly?.apiKey, "file-key");
-  assert.equal(openAiOnly?.rootUrl, "http://file.test");
+  assert.equal(openAiOnly?.rootUrl, "https://file.test");
 
   await writeFile(
     new URL("cliproxyapi.json", agentDir),

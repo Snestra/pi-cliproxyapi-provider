@@ -240,7 +240,7 @@ test("endpoint forms, injected connection precedence and family routing", () => 
   assert.equal(resolveConnection(env, file, stored)?.apiKey, "env-key");
   assert.equal(
     resolveConnection(env, file, stored)?.rootUrl,
-    "http://env.test:8317"
+    "https://env.test:8317"
   );
   assert.equal(resolveConnection({}, file, stored)?.apiKey, "file-key");
   assert.equal(resolveConnection({}, {}, stored)?.apiKey, "stored-key");
@@ -589,7 +589,7 @@ test("mapCatalog declares prompt cache lifetimes only for Anthropic Messages mod
   ]);
 
   const { models } = mapCatalog(fixture.models, {
-    baseUrl: "http://proxy.test",
+    baseUrl: "https://proxy.test",
     promptCache: (id) => lookup.get(id),
   });
 

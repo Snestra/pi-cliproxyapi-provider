@@ -269,7 +269,7 @@ export const isModelReferencedAsDefault = (
   modelId: string
 ): boolean => {
   try {
-    const settings = readJsonFile(
+    const settings = readJsonMemo(
       path.join(agentDir, "settings.json"),
       SettingsFileSchema
     );

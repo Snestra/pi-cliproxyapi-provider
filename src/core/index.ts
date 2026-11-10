@@ -24,7 +24,7 @@
  * pollOAuthStatus(options: PollOAuthStatusOptions): Promise<OAuthStatus>
  * fetchUsage(options: UsageFetchOptions): Promise<ProviderUsage[]>
  * resetCooldowns(options: ResetCooldownsOptions): Promise<string[]>
- * unavailableModels(usage: readonly ProviderUsage[], exhausted: Readonly<Record<string, number>>, now?: number): Map<string, number>
+ * unavailableModels(usage: readonly ProviderUsage[], exhausted: Readonly<Record<string, number>>, now?: number, ignoreAccountExhaustion?: (account: ProviderUsage, model: string) => boolean): Map<string, number>
  */
 // pi maps only some pi-ai entry points into extensions. compat re-exports the same lazy API factories.
 import {
@@ -48,6 +48,7 @@ import { wrapCliproxyStreams } from "./streams.ts";
 
 export {
   CatalogHttpError,
+  applyAnthropicSettings,
   DEFAULT_MODEL_STALE_TTL_MS,
   MODEL_API_BY_FAMILY,
   fetchCatalog,

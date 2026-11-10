@@ -25,35 +25,50 @@ import { formatStatusLine, outUntil } from "./footer-render.ts";
 export const USAGE_FILE_NAME = "cliproxyapi-usage.json";
 export const MANAGEMENT_KEY_ENV = "CLIPROXY_MANAGEMENT_KEY";
 
-const commandKeys = new Map<string, string | undefined>();
+/** A key command's output, or why it gave none. Never holds the command text. */
+type KeyCommandResult = { key: string } | { error: string };
+
+const commandKeys = new Map<string, KeyCommandResult>();
+
+const runKeyCommand = (command: string): KeyCommandResult => {
+  const result = spawnSync("/bin/sh", ["-c", command], {
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "ignore"],
+    timeout: 10_000,
+  });
+
+  if (result.error || result.signal) {
+    return { error: "the key command timed out or could not start" };
+  }
+
+  if (result.status !== 0) {
+    return { error: `the key command exited with status ${result.status}` };
+  }
+
+  const key = result.stdout.trim();
+
+  return key ? { key } : { error: "the key command printed nothing" };
+};
 
 /**
  * A managementKey that starts with "!" is a shell command whose output is the key, as with keys in
  * pi's auth.json. Each command runs once per process, and a failure stays cached, as in pi.
  */
-const resolveKeyValue = (value: string): string | undefined => {
+const resolveKeyValue = (value: string): KeyCommandResult => {
   if (!value.startsWith("!")) {
-    return value;
+    return { key: value };
   }
 
-  if (!commandKeys.has(value)) {
-    const result = spawnSync("/bin/sh", ["-c", value.slice(1)], {
-      encoding: "utf-8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 10_000,
-    });
+  const cached = commandKeys.get(value) ?? runKeyCommand(value.slice(1));
+  commandKeys.set(value, cached);
 
-    const key = result.status === 0 ? result.stdout.trim() : "";
-
-    commandKeys.set(value, key || undefined);
-  }
-
-  return commandKeys.get(value);
+  return cached;
 };
 
 /** How old the shared usage snapshot may get before a session fetches a new one. */
 const USAGE_TTL_MS = 2 * 60_000;
 const STATUS_KEY = "cliproxyapi-usage";
+const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
 
 const UsageWindowSchema = Type.Object({
   label: Type.String(),
@@ -133,7 +148,21 @@ export class UsageTracker {
     const configured = loadCliproxyConfig(this.options.agentDir).managementKey;
     const fromFile = configured ? resolveKeyValue(configured) : undefined;
 
-    return fromFile ? { key: fromFile, source: "cliproxyapi.json" } : undefined;
+    return fromFile && "key" in fromFile
+      ? { key: fromFile.key, source: "cliproxyapi.json" }
+      : undefined;
+  }
+
+  /** Why the managementKey command in cliproxyapi.json gave no key, when it failed and no env key overrides it. */
+  managementKeyError(): string | undefined {
+    if ((this.options.env ?? process.env)[MANAGEMENT_KEY_ENV]?.trim()) {
+      return undefined;
+    }
+
+    const configured = loadCliproxyConfig(this.options.agentDir).managementKey;
+    const result = configured ? resolveKeyValue(configured) : undefined;
+
+    return result && "error" in result ? result.error : undefined;
   }
 
   private managementKey(): string | undefined {
@@ -558,15 +587,15 @@ export interface RegisterUsageOptions {
   getCatalogIds: () => readonly string[];
 }
 
-/**
- * Keeps pi's model list and the usage footer in step with the shared usage
- * file: quota errors hide a model, replies and resets bring it back.
- */
 export interface UsageHandle {
   /** Fetches usage now and applies it, for /cliproxyapi-refresh. */
   refresh: (ctx: ExtensionContext) => Promise<void>;
 }
 
+/**
+ * Keeps pi's model list and the usage footer in step with the shared usage
+ * file: quota errors hide a model, replies and resets bring it back.
+ */
 export const registerUsage = (
   pi: ExtensionAPI,
   options: RegisterUsageOptions
@@ -675,14 +704,25 @@ export const registerUsage = (
       clearTimeout(timer);
     }
 
-    // Wakes when a hidden model comes back or the usage snapshot goes stale.
-    timer = setTimeout(() => {
-      timer = undefined;
+    const delay = tracker.nextChangeAt() - Date.now();
 
-      if (active) {
-        void update(active, false);
-      }
-    }, tracker.nextChangeAt() - Date.now());
+    // Nothing will change without a management key or a hidden model.
+    if (!Number.isFinite(delay)) {
+      return;
+    }
+
+    // Wakes when a hidden model comes back or the usage snapshot goes stale.
+    timer = setTimeout(
+      () => {
+        timer = undefined;
+
+        if (active) {
+          void update(active, false);
+        }
+      },
+      // Node runs longer delays after 1 ms.
+      Math.min(delay, MAX_TIMER_DELAY_MS)
+    );
     timer.unref();
   };
 
@@ -714,6 +754,15 @@ export const registerUsage = (
   });
   pi.on("session_start", async (_event, ctx) => {
     active = ctx;
+    const keyError = tracker.managementKeyError();
+
+    if (keyError) {
+      warn(
+        ctx,
+        `CLIProxyAPI management key from cliproxyapi.json is unavailable: ${keyError}. The usage footer, /cliproxyapi-login, and /cliproxyapi-reset need it.`
+      );
+    }
+
     await update(ctx, false);
   });
   pi.on("agent_end", async (_event, ctx) => {

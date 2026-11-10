@@ -30,6 +30,11 @@ export interface ConnectionSources {
 const HTTP_SCHEME = /^https?:\/\//iu;
 const OTHER_SCHEME = /^[a-z][a-z\d+.-]*:\/\//iu;
 const TRAILING_SLASHES = /\/+$/u;
+const LOOPBACK_HOSTS = new Set(["127.0.0.1", "[::1]", "localhost"]);
+
+/** The host part of a URL without a scheme, such as `host:8317` from `host:8317/v1`. */
+const bareHost = (input: string): string =>
+  new URL(`http://${input}`).hostname.toLowerCase();
 
 const ENDPOINT_SUFFIX =
   /\/(?:v1(?:\/(?:models|messages|responses|chat\/completions))?|backend-api(?:\/codex\/responses)?)$/u;
@@ -47,10 +52,22 @@ export const resolveEndpoints = (baseUrl: string): Endpoints => {
     throw new Error("baseUrl must use HTTP or HTTPS");
   }
 
-  const url = new URL(HTTP_SCHEME.test(input) ? input : `http://${input}`);
+  // A bare host gets https, unless it is this machine.
+  const withScheme = HTTP_SCHEME.test(input)
+    ? input
+    : `${LOOPBACK_HOSTS.has(bareHost(input)) ? "http" : "https"}://${input}`;
+
+  const url = new URL(withScheme);
 
   if (url.username || url.password) {
     throw new Error("baseUrl must not contain credentials");
+  }
+
+  // The API key and the management key would cross the network unencrypted.
+  if (url.protocol === "http:" && !LOOPBACK_HOSTS.has(url.hostname)) {
+    throw new Error(
+      "baseUrl must use HTTPS unless it points at this machine (localhost, 127.0.0.1, or ::1)"
+    );
   }
 
   const path = url.pathname

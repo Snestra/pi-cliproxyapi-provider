@@ -22,6 +22,8 @@ export interface StatusSnapshot {
   paused: boolean;
   /** Undefined without a management key. */
   management?: { source: ManagementKeySource; usageAgeMs?: number };
+  /** Why the managementKey command gave no key. */
+  managementError?: string;
   searchModel: { configured?: string; effective?: string };
   thinking: Readonly<Record<string, ThoughtSummary>>;
 }
@@ -96,9 +98,12 @@ const formatFast = (snapshot: StatusSnapshot): string => {
   return `${snapshot.fast ? "on" : "off"} (${support})`;
 };
 
-const formatManagement = (management: StatusSnapshot["management"]): string => {
+const formatManagement = (
+  management: StatusSnapshot["management"],
+  error: string | undefined
+): string => {
   if (!management) {
-    return "not set";
+    return error ? `key command failed: ${error}` : "not set";
   }
 
   const usage =
@@ -134,7 +139,7 @@ export const formatStatus = (snapshot: StatusSnapshot): string =>
     `Models       ${formatModels(snapshot)}`,
     `Prices       ${formatPrices(snapshot.prices)}`,
     `Fast         ${formatFast(snapshot)}    Paused  ${snapshot.paused ? "yes" : "no"}    Footer  ${snapshot.footer ? "custom" : "pi stock"}`,
-    `Management   ${formatManagement(snapshot.management)}`,
+    `Management   ${formatManagement(snapshot.management, snapshot.managementError)}`,
     `Web search   ${formatSearchModel(snapshot.searchModel)}`,
     `Thinking     ${formatThinking(snapshot.thinking)}`,
   ].join("\n");

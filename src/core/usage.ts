@@ -1,8 +1,7 @@
 import { Type } from "typebox";
 import type { Static, TSchema } from "typebox";
-import { Value } from "typebox/value";
 
-import { resolveEndpoints } from "./connection.ts";
+import { managementRequest, parseJson } from "./management.ts";
 
 /** One rate-limit window of an upstream account, such as Claude's five hours. */
 export interface UsageWindow {
@@ -41,7 +40,6 @@ export interface ResetCooldownsOptions extends UsageFetchOptions {
   modelId?: string;
 }
 
-const DEFAULT_TIMEOUT_MS = 10_000;
 const SECOND_MS = 1000;
 const MINUTE_MS = 60 * SECOND_MS;
 const FULL_PERCENT = 100;
@@ -494,81 +492,30 @@ const fullUntil = (windows: readonly UsageWindow[]): number | undefined => {
   return until;
 };
 
-const parseJson = <Schema extends TSchema>(
-  schema: Schema,
-  text: string
-): Static<Schema> | undefined => {
-  try {
-    const value: unknown = JSON.parse(text);
-
-    return Value.Check(schema, value) ? value : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
 export const fetchUsage = async (
   options: UsageFetchOptions
 ): Promise<ProviderUsage[]> => {
-  const fetchFn = options.fetch ?? globalThis.fetch;
   const now = options.now ?? Date.now();
-  const managementUrl = `${resolveEndpoints(options.baseUrl).rootUrl}/v8/management`;
-
-  const headers = {
-    Authorization: `Bearer ${options.managementKey}`,
-    "Content-Type": "application/json",
-  };
-
-  const request = async <Schema extends TSchema>(
-    route: string,
-    schema: Schema,
-    init: RequestInit = {}
-  ): Promise<Static<Schema>> => {
-    const timeout = AbortSignal.timeout(
-      options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    );
-
-    const response = await fetchFn(`${managementUrl}${route}`, {
-      ...init,
-      headers,
-      signal: options.signal
-        ? AbortSignal.any([options.signal, timeout])
-        : timeout,
-    });
-
-    const [routePath] = route.split("?");
-
-    if (!response.ok) {
-      throw new Error(
-        `CLIProxyAPI management ${routePath} returned HTTP ${response.status}`
-      );
-    }
-
-    const value = parseJson(schema, await response.text());
-
-    if (value === undefined) {
-      throw new Error(
-        `CLIProxyAPI management ${routePath} returned an unexpected shape`
-      );
-    }
-
-    return value;
-  };
 
   const upstream = async <Schema extends TSchema>(
     credential: Credential,
     url: string,
     schema: Schema
   ): Promise<Static<Schema> | undefined> => {
-    const result = await request("/requests/api-call", ApiCallSchema, {
-      body: JSON.stringify({
-        auth_index: credential.auth_index,
-        header: TOKEN_HEADER,
-        method: "GET",
-        url,
-      }),
-      method: "POST",
-    });
+    const result = await managementRequest(
+      options,
+      "/requests/api-call",
+      ApiCallSchema,
+      {
+        body: JSON.stringify({
+          auth_index: credential.auth_index,
+          header: TOKEN_HEADER,
+          method: "GET",
+          url,
+        }),
+        method: "POST",
+      }
+    );
 
     const ok = result.status_code >= 200 && result.status_code < 300;
 
@@ -614,7 +561,8 @@ export const fetchUsage = async (
     // the credential. Without one there is no recorded format to parse.
     if (credential.quota_plugin_id !== undefined) {
       return pluginWindows(
-        await request(
+        await managementRequest(
+          options,
           `/plugins/${encodeURIComponent(credential.quota_plugin_id)}/quota`,
           PluginQuotaSchema,
           {
@@ -629,18 +577,29 @@ export const fetchUsage = async (
     return [];
   };
 
-  const { files } = await request("/credentials", CredentialsSchema);
+  const { files } = await managementRequest(
+    options,
+    "/credentials",
+    CredentialsSchema
+  );
+
   const credentials = files.filter((credential) => !credential.disabled);
 
-  return Promise.all(
-    credentials.map(async (credential): Promise<ProviderUsage> => {
+  const accounts = await Promise.all(
+    credentials.map(async (credential): Promise<ProviderUsage | undefined> => {
       const [modelList, windows] = await Promise.all([
-        request(
+        managementRequest(
+          options,
           `/credentials/models?name=${encodeURIComponent(credential.name)}`,
           CredentialModelsSchema
-        ),
+        ).catch((): null => null),
         windowsFor(credential).catch((): UsageWindow[] => []),
       ]);
+
+      // One failing account must not empty the footer, so only it is left out.
+      if (!modelList) {
+        return undefined;
+      }
 
       const retryAt = isoTime(credential.next_retry_after);
 
@@ -691,6 +650,8 @@ export const fetchUsage = async (
       return account;
     })
   );
+
+  return accounts.filter((account) => account !== undefined);
 };
 
 /**
@@ -703,57 +664,20 @@ export const fetchUsage = async (
 export const resetCooldowns = async (
   options: ResetCooldownsOptions
 ): Promise<string[]> => {
-  const fetchFn = options.fetch ?? globalThis.fetch;
   const modelId = options.modelId?.trim() || undefined;
-  const managementUrl = `${resolveEndpoints(options.baseUrl).rootUrl}/v8/management`;
 
-  const headers = {
-    Authorization: `Bearer ${options.managementKey}`,
-    "Content-Type": "application/json",
-  };
+  const { files } = await managementRequest(
+    options,
+    "/credentials",
+    CredentialsSchema
+  );
 
-  const request = async <Schema extends TSchema>(
-    route: string,
-    schema: Schema,
-    init: RequestInit = {}
-  ): Promise<Static<Schema>> => {
-    const timeout = AbortSignal.timeout(
-      options.timeoutMs ?? DEFAULT_TIMEOUT_MS
-    );
-
-    const response = await fetchFn(`${managementUrl}${route}`, {
-      ...init,
-      headers,
-      signal: options.signal
-        ? AbortSignal.any([options.signal, timeout])
-        : timeout,
-    });
-
-    const [routePath] = route.split("?");
-
-    if (!response.ok) {
-      throw new Error(
-        `CLIProxyAPI management ${routePath} returned HTTP ${response.status}`
-      );
-    }
-
-    const value = parseJson(schema, await response.text());
-
-    if (value === undefined) {
-      throw new Error(
-        `CLIProxyAPI management ${routePath} returned an unexpected shape`
-      );
-    }
-
-    return value;
-  };
-
-  const { files } = await request("/credentials", CredentialsSchema);
   const credentials = files.filter((credential) => !credential.disabled);
 
   const served = await Promise.all(
     credentials.map(async (credential) => {
-      const modelList = await request(
+      const modelList = await managementRequest(
+        options,
         `/credentials/models?name=${encodeURIComponent(credential.name)}`,
         CredentialModelsSchema
       );
@@ -776,7 +700,8 @@ export const resetCooldowns = async (
 
   const results = await Promise.all(
     targets.map(async ({ credential }) => {
-      const result = await request(
+      const result = await managementRequest(
+        options,
         "/routing/cooldown/reset",
         CooldownResetSchema,
         {

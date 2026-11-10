@@ -77,7 +77,7 @@ export const waitForPauseToEnd = async (
       return;
     }
 
-    await delay(POLL_INTERVAL_MS);
+    await delay(POLL_INTERVAL_MS, undefined, { signal });
   }
 };
 
