@@ -1,4 +1,5 @@
 import type {
+  AnthropicMessagesCompat,
   Model,
   ModelPromptCache,
   ThinkingLevelMap,
@@ -37,14 +38,12 @@ const OptionalNumber = Type.Optional(Type.Number());
 const EffortName = Type.String();
 
 export const CatalogModelSchema = Type.Object({
-  additional_speed_tiers: Type.Optional(Type.Array(Type.String())),
   context_window: OptionalNumber,
   cpa_capabilities: Type.Optional(
     Type.Object({
       web_search: Type.Optional(Type.Boolean()),
     })
   ),
-  default_service_tier: Type.Optional(Type.Union([Type.String(), Type.Null()])),
   description: OptionalString,
   display_name: OptionalString,
   id: OptionalString,
@@ -93,7 +92,6 @@ export interface CliproxyModel extends Model<CliproxyApi> {
   thoughtSummary: ThoughtSummary;
   supportsFast: boolean;
   supportsWebSearch?: boolean;
-  supportsReasoningEffortUpdates?: boolean;
   thinkingLevelMap?: ThinkingLevelMap & { ultra?: string | null };
   stale?: boolean;
   lastSeenAt?: number;
@@ -113,6 +111,8 @@ export interface MappingOptions {
   imageInput?: Readonly<Record<string, boolean>>;
   /** Prompt cache lifetimes by model id. Core has no built-in numbers. */
   promptCache?: (id: string) => ModelPromptCache | undefined;
+  /** pi-ai's own compat flags by model id, such as adaptive thinking for Claude 5. */
+  anthropicCompat?: (id: string) => AnthropicMessagesCompat | undefined;
 }
 
 export interface MappedCatalog {
@@ -264,20 +264,40 @@ const webSearchCapability = (
 const readFast = (options: MappingOptions): boolean =>
   options.fast?.() ?? false;
 
-const addAnthropicSettings = (
+/** Sets compat and prompt cache on an Anthropic Messages model, including one loaded from an older cache. */
+export const applyAnthropicSettings = (
   model: CliproxyModel,
-  options: MappingOptions
+  options: Pick<MappingOptions, "anthropicCompat" | "promptCache">
 ): void => {
   // pi-ai sends the session id as X-Session-Affinity only when asked.
   // CLIProxyAPI's session affinity reads it to keep a session, and the
   // prompt cache, on one upstream account. Responses always sends one.
-  model.compat = { sendSessionAffinityHeaders: true };
+  model.compat = {
+    ...options.anthropicCompat?.(model.id),
+    sendSessionAffinityHeaders: true,
+  };
 
   // pi warms the prompt cache only for models that declare its lifetimes.
   const promptCache = options.promptCache?.(model.id);
 
   if (promptCache) {
     model.promptCache = promptCache;
+  }
+};
+
+const applyApiSettings = (
+  model: CliproxyModel,
+  entry: CatalogModel,
+  options: MappingOptions
+): void => {
+  if (model.api === "anthropic-messages") {
+    applyAnthropicSettings(model, options);
+  } else if (
+    model.api === "openai-responses" &&
+    entry.supports_reasoning_effort_updates === true
+  ) {
+    // Effort then changes through configuration_update items, which keep the prompt cache.
+    model.compat = { supportsMidConvoEffort: true };
   }
 };
 
@@ -318,15 +338,11 @@ export const mapCatalog = (
       name: (entry.display_name ?? entry.name ?? id).trim() || id,
       provider: options.providerId ?? "cliproxyapi",
       supportsFast,
-      supportsReasoningEffortUpdates:
-        entry.supports_reasoning_effort_updates === true,
       thoughtSummary: options.thoughtSummaries?.[id] ?? "omitted",
       ...webSearchCapability(entry),
     };
 
-    if (api === "anthropic-messages") {
-      addAnthropicSettings(model, options);
-    }
+    applyApiSettings(model, entry, options);
 
     models.set(id, model);
   }

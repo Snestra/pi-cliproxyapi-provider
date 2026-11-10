@@ -2,21 +2,12 @@
 import { setTimeout as delay } from "node:timers/promises";
 
 import { Type } from "typebox";
-import type { Static, TSchema } from "typebox";
-import { Value } from "typebox/value";
 
-import { resolveEndpoints } from "./connection.ts";
+import { ManagementHttpError, managementRequest } from "./management.ts";
+import type { ManagementRequestOptions } from "./management.ts";
 
 /** Shared options for the CLIProxyAPI v8 management OAuth flow. */
-export interface OAuthRequestOptions {
-  baseUrl: string;
-  /** The CLIProxyAPI management key, not the client API key. */
-  managementKey: string;
-  fetch?: typeof globalThis.fetch;
-  signal?: AbortSignal;
-  /** Per-request timeout. */
-  timeoutMs?: number;
-}
+export type OAuthRequestOptions = ManagementRequestOptions;
 
 export interface Account {
   authIndex: string;
@@ -70,7 +61,6 @@ export interface OAuthStatus {
   error?: string;
 }
 
-const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_POLL_INTERVAL_MS = 2000;
 const DEFAULT_MAX_WAIT_MS = 5 * 60_000;
 
@@ -109,23 +99,6 @@ const AccountsSchema = Type.Object({
   ),
 });
 
-const ErrorSchema = Type.Object({
-  error: Type.Optional(Type.String()),
-});
-
-const parseJson = <Schema extends TSchema>(
-  schema: Schema,
-  text: string
-): Static<Schema> | undefined => {
-  try {
-    const value: unknown = JSON.parse(text);
-
-    return Value.Check(schema, value) ? value : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
 const nonEmpty = (value: string | undefined, name: string): string => {
   const trimmed = value?.trim() ?? "";
 
@@ -136,68 +109,11 @@ const nonEmpty = (value: string | undefined, name: string): string => {
   return trimmed;
 };
 
-const managementUrl = (baseUrl: string): string =>
-  `${resolveEndpoints(baseUrl).rootUrl}/v8/management`;
-
-class ManagementHttpError extends Error {
-  readonly status: number;
-
-  constructor(status: number, message: string) {
-    super(message);
-    this.name = "ManagementHttpError";
-    this.status = status;
-  }
-}
-
-const request = async <Schema extends TSchema>(
-  options: OAuthRequestOptions,
-  route: string,
-  schema: Schema,
-  init: RequestInit = {}
-): Promise<Static<Schema>> => {
-  const fetchFn = options.fetch ?? globalThis.fetch;
-  const managementKey = nonEmpty(options.managementKey, "managementKey");
-  const timeout = AbortSignal.timeout(options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-
-  const response = await fetchFn(`${managementUrl(options.baseUrl)}${route}`, {
-    ...init,
-    headers: {
-      Authorization: `Bearer ${managementKey}`,
-      "Content-Type": "application/json",
-    },
-    signal: options.signal
-      ? AbortSignal.any([options.signal, timeout])
-      : timeout,
-  });
-
-  const [routePath] = route.split("?");
-  const text = await response.text();
-
-  if (!response.ok) {
-    const detail = parseJson(ErrorSchema, text)?.error;
-
-    throw new ManagementHttpError(
-      response.status,
-      `CLIProxyAPI management ${routePath} returned HTTP ${response.status}${detail ? `: ${detail}` : ""}`
-    );
-  }
-
-  const value = parseJson(schema, text);
-
-  if (value === undefined) {
-    throw new Error(
-      `CLIProxyAPI management ${routePath} returned an unexpected shape`
-    );
-  }
-
-  return value;
-};
-
 export const refreshServerCatalog = async (
   options: OAuthRequestOptions
 ): Promise<boolean> => {
   try {
-    await request(options, "/models/refresh", RefreshSchema, {
+    await managementRequest(options, "/models/refresh", RefreshSchema, {
       method: "POST",
     });
 
@@ -214,7 +130,11 @@ export const refreshServerCatalog = async (
 export const listAccounts = async (
   options: OAuthRequestOptions
 ): Promise<Account[]> => {
-  const result = await request(options, "/credentials", AccountsSchema);
+  const result = await managementRequest(
+    options,
+    "/credentials",
+    AccountsSchema
+  );
 
   return result.files.map((file) => ({
     authIndex: file.auth_index,
@@ -244,7 +164,7 @@ export const startOAuth = async (
 ): Promise<OAuthStart> => {
   const provider = nonEmpty(options.provider, "provider");
 
-  const result = await request(
+  const result = await managementRequest(
     options,
     options.authIndex === undefined
       ? `/oauth/auth-url?provider=${encodeURIComponent(provider)}`
@@ -310,7 +230,7 @@ export const submitOAuthCallback = async (
     }
   }
 
-  return await request(options, "/oauth/callback", StatusSchema, {
+  return await managementRequest(options, "/oauth/callback", StatusSchema, {
     body: JSON.stringify(body),
     method: "POST",
   });
@@ -331,7 +251,7 @@ export const pollOAuthStatus = async (
   while (true) {
     options.signal?.throwIfAborted();
 
-    const result = await request(
+    const result = await managementRequest(
       options,
       `/oauth/status?state=${encodeURIComponent(state)}`,
       StatusSchema

@@ -92,11 +92,7 @@ interface ResponsesPayload {
 
 interface ResponsesEventPayload extends ResponsesPayload {
   delta?: string;
-  error?: {
-    message?: string;
-  };
   item?: ResponsesItemPayload;
-  message?: string;
   response?: ResponsesPayload;
   text?: string;
   type?: string;
@@ -389,7 +385,7 @@ const handleCompletedEvent = (
   }
 
   if (completed.output) {
-    // Fact 2: Kimi and Muse put the answer in a later message item.
+    // Kimi and Muse put the answer in a later message item.
     state.completedMessageText = lastMessageText(completed.output);
   }
 
@@ -483,6 +479,8 @@ export const runWebSearch = async (
 
   const response = await fetchFn(resolveResponsesEndpoint(responsesUrl), {
     body: JSON.stringify({
+      // CLIProxyAPI drops action.sources unless the client asks for them.
+      include: ["web_search_call.action.sources"],
       input: [
         {
           content: [{ text: trimmedQuery, type: "input_text" }],

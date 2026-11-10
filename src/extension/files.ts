@@ -28,7 +28,14 @@ export const readJsonFile = <Schema extends TSchema>(
     throw error;
   }
 
-  const value: unknown = JSON.parse(text);
+  let value: unknown;
+
+  try {
+    value = JSON.parse(text);
+  } catch {
+    // Node's SyntaxError quotes nearby file text, which can include a key.
+    throw new Error(`Invalid ${path.basename(filePath)}: not JSON`);
+  }
 
   if (Value.Check(schema, value)) {
     return value;

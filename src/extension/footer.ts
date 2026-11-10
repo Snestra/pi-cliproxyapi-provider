@@ -500,28 +500,6 @@ export class FooterController {
       available
     ) => truncateToWidth(text, available, "")
   ): string {
-    return FooterController.assembleRow1Parts(
-      cwdPart,
-      statParts,
-      contextPart,
-      right,
-      rightWithoutProvider,
-      paint,
-      width,
-      shrinkRight
-    );
-  }
-
-  private static assembleRow1Parts(
-    cwdPart: string,
-    statParts: StatPart[],
-    contextPart: string,
-    right: string,
-    rightWithoutProvider: string,
-    paint: Paint,
-    width: number,
-    shrinkRight: (text: string, available: number) => string
-  ): string {
     let cwd = cwdPart;
 
     const buildLeft = (): string =>

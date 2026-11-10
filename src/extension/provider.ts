@@ -1,6 +1,5 @@
 /* oxlint-disable eslint/no-await-in-loop -- OAuth login prompts and validation are intentionally sequential so each retry uses the latest input. */
 import type {
-  AuthResult,
   ModelCost,
   OAuthCredential,
   Provider,
@@ -9,6 +8,7 @@ import type {
 } from "@earendil-works/pi-ai";
 
 import {
+  applyAnthropicSettings,
   createCliproxyProvider,
   fetchCatalog,
   mapCatalog,
@@ -23,6 +23,7 @@ import type {
   CostCatalog,
   ResolvedConnection,
 } from "../core/index.ts";
+import { anthropicCompat, anthropicPromptCache } from "./anthropic-builtins.ts";
 import {
   buildOAuthCredentials,
   CREDENTIAL_TTL_MS,
@@ -37,7 +38,6 @@ import {
 import type { CliproxyConfig } from "./config.ts";
 import type { FastModeController } from "./fast.ts";
 import { PriceCache } from "./prices.ts";
-import { anthropicPromptCache } from "./prompt-cache.ts";
 
 export interface ExtensionProviderOptions {
   agentDir: string;
@@ -95,6 +95,11 @@ const oauthConnection = (
   };
 };
 
+const builtins = {
+  anthropicCompat,
+  promptCache: anthropicPromptCache,
+};
+
 export const createExtensionProvider = (
   options: ExtensionProviderOptions
 ): ExtensionProviderController => {
@@ -106,7 +111,7 @@ export const createExtensionProvider = (
     options.fast.isEnabled()
   );
 
-  // The models cache predates promptCache, so cached Claude models get it here.
+  // Cached Claude models may predate the current compat and promptCache, so they get them here.
   let currentModels: CliproxyModel[] = (cached?.models ?? []).map((model) => {
     const loaded: CliproxyModel = {
       ...model,
@@ -115,13 +120,8 @@ export const createExtensionProvider = (
       thoughtSummary: config.thinkingDisplay?.[model.id] ?? "omitted",
     };
 
-    const promptCache =
-      model.api === "anthropic-messages"
-        ? anthropicPromptCache(model.id)
-        : undefined;
-
-    if (promptCache) {
-      loaded.promptCache = promptCache;
+    if (model.api === "anthropic-messages") {
+      applyAnthropicSettings(loaded, builtins);
     }
 
     return loaded;
@@ -152,7 +152,7 @@ export const createExtensionProvider = (
     imageInput: config.imageInput,
     maxTokens: config.maxTokens,
     models: currentModels,
-    promptCache: anthropicPromptCache,
+    ...builtins,
     providerId: options.providerId,
     providerName: options.providerName,
     thoughtSummaries: config.thinkingDisplay,
@@ -170,10 +170,9 @@ export const createExtensionProvider = (
     });
 
     // Prices are kept per catalog id, so the ids come from the same mapping the models do.
-    const ids = mapCatalog(entries, {
-      baseUrl: connection.baseUrl,
-      promptCache: anthropicPromptCache,
-    }).models.map((model) => model.id);
+    const ids = mapCatalog(entries, { baseUrl: connection.baseUrl }).models.map(
+      (model) => model.id
+    );
 
     const { catalog: costs, warning } = await prices.load(ids, signal);
 
@@ -187,7 +186,7 @@ export const createExtensionProvider = (
       fast: options.fast.isEnabled,
       imageInput: config.imageInput,
       maxTokens: config.maxTokens,
-      promptCache: anthropicPromptCache,
+      ...builtins,
       providerId: options.providerId,
       thoughtSummaries: config.thinkingDisplay,
     });
@@ -239,7 +238,7 @@ export const createExtensionProvider = (
       return;
     }
 
-    let { connection } = options;
+    let connection: ResolvedConnection;
 
     if (context.credential?.type === "oauth") {
       connection = oauthConnection(context.credential, options.connection);
@@ -313,9 +312,11 @@ export const createExtensionProvider = (
           type: "progress",
         });
         await refresh(connection);
+        // pi keeps the key and address in auth.json. The file outranks the
+        // login, so values left there would hide this login.
         saveCliproxyConfig(options.agentDir, {
-          apiKey,
-          baseUrl,
+          apiKey: undefined,
+          baseUrl: undefined,
           providerId: options.providerId,
           providerName: options.providerName,
         });
@@ -345,10 +346,8 @@ export const createExtensionProvider = (
                 providerId: options.providerId,
               }) ?? options.connection);
 
-          if (!connection || options.configured === false) {
-            const unconfigured: AuthResult | undefined = undefined;
-
-            return Promise.resolve(unconfigured);
+          if (options.configured === false) {
+            return Promise.resolve(undefined);
           }
 
           return Promise.resolve({
@@ -369,6 +368,8 @@ export const createExtensionProvider = (
       },
     },
     filterModels: (models) => options.filterAvailable?.(models) ?? models,
+    // core's own getAllModels returns its startup baseline, so it must follow currentModels too.
+    getAllModels: () => currentModels,
     getModels: () => currentModels,
     refreshModels,
   };

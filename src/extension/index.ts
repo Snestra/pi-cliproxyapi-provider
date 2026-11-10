@@ -446,6 +446,7 @@ export default async function cliproxyapiProvider(
             ? undefined
             : ageSince(management.usageFetchedAt),
       },
+      managementError: tracker.managementKeyError(),
       models: models.length,
       paused: current.pause ?? pause.isEnabled(),
       prices:

@@ -38,7 +38,7 @@ export CLIPROXYAPI_BASE_URL=http://127.0.0.1:8317
 export CLIPROXYAPI_API_KEY=your-key
 ```
 
-The extension looks for each value in the environment first, then in `~/.pi/agent/cliproxyapi.json`, and then in the `/login` credentials. The address can be the server root or any of its API paths, e.g., `http://host:8317/v1`.
+The extension looks for each value in the environment first, then in `~/.pi/agent/cliproxyapi.json`, and then in the `/login` credentials. The address can be the server root or any of its API paths, e.g., `https://host:8317/v1`. The extension refuses plain `http` for any host other than this machine, so keys never cross the network unencrypted. An address without a scheme gets `https`, or `http` for `localhost`, `127.0.0.1`, and `::1`.
 
 ## Commands
 
