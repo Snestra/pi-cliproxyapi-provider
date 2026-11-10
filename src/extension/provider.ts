@@ -78,6 +78,7 @@ export const createExtensionProvider = (
 
   const derive = (): void => {
     const config = settings.config();
+    fast.sync(config.fast ?? false);
 
     models = mapCatalog(entries, {
       anthropicCompat,

@@ -8,6 +8,11 @@ export class FastModeController {
     this.enabled = enabled;
   }
 
+  /** Follows cliproxyapi.json, which /fast and other pi processes write. */
+  sync(enabled: boolean): void {
+    this.enabled = enabled;
+  }
+
   setSupportedModelIds(modelIds: Iterable<string>): void {
     this.supportedModelIds = new Set(modelIds);
   }
