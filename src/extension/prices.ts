@@ -1,5 +1,3 @@
-import path from "node:path";
-
 import { Type } from "typebox";
 import type { Static } from "typebox";
 
@@ -11,9 +9,7 @@ import {
 } from "../core/costs.ts";
 import type { CostCatalog } from "../core/costs.ts";
 import { DAY_MS, HOUR_MS, MINUTE_MS } from "../core/time.ts";
-import { readJsonMemo, writeJsonAtomic } from "./files.ts";
-
-const PRICES_FILE_NAME = "cliproxyapi-prices.json";
+import { CacheSection } from "./cache.ts";
 
 /** models.dev prices change rarely, so they are revalidated at most once a day. */
 const PRICES_TTL_MS = DAY_MS;
@@ -52,7 +48,8 @@ const PricesFileSchema = Type.Object({
 type PricesFile = Static<typeof PricesFileSchema>;
 
 export interface PriceCacheOptions {
-  agentDir: string;
+  /** The shared cache file. The prices live in its "prices" section. */
+  cacheFile: string;
   costsUrl?: string;
   now?: () => number;
 }
@@ -88,18 +85,22 @@ const formatAge = (ageMs: number): string => {
 };
 
 /**
- * Keeps the models.dev prices of the catalog's ids in
- * `<agentDir>/cliproxyapi-prices.json`. Prices under 24 h old are used without
+ * Keeps the models.dev prices of the catalog's ids in the "prices" section
+ * of the shared cache file. Prices under 24 h old are used without
  * a request. Older ones are revalidated with If-None-Match, so an unchanged
  * catalog costs one 304 instead of a 5.9 MB download and parse.
  */
 export class PriceCache {
-  private readonly filePath: string;
+  private readonly section: CacheSection<typeof PricesFileSchema>;
   private readonly costsUrl: string;
   private readonly now: () => number;
 
   constructor(options: PriceCacheOptions) {
-    this.filePath = path.join(options.agentDir, PRICES_FILE_NAME);
+    this.section = new CacheSection(
+      options.cacheFile,
+      "prices",
+      PricesFileSchema
+    );
     this.costsUrl = options.costsUrl ?? DEFAULT_COSTS_URL;
     this.now = options.now ?? Date.now;
   }
@@ -176,16 +177,12 @@ export class PriceCache {
     };
   }
 
-  /** A missing or damaged file reads as no prices, so the next load fetches and rewrites it. */
+  /** A missing or damaged section reads as no prices, so the next load fetches and rewrites it. */
   private read(): PricesFile | undefined {
-    try {
-      return readJsonMemo(this.filePath, PricesFileSchema);
-    } catch {
-      return undefined;
-    }
+    return this.section.read();
   }
 
   private write(file: Omit<PricesFile, "source">): void {
-    writeJsonAtomic(this.filePath, { ...file, source: this.costsUrl });
+    this.section.write({ ...file, source: this.costsUrl });
   }
 }

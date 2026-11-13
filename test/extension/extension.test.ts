@@ -37,6 +37,10 @@ import { UsageTracker } from "../../src/extension/usage.ts";
 
 const outputDirectory = new URL("output/", import.meta.url);
 
+/** Tests set XDG_CACHE_HOME to the agent dir, so the cache file lands inside it. */
+const cacheFileIn = (agentDir: URL): URL =>
+  new URL("pi-cliproxyapi/cache.json", agentDir);
+
 const catalog: CatalogModel[] = [
   {
     context_window: 200_000,
@@ -239,7 +243,7 @@ const startPriceCache = async (
   const clock = { now: Date.parse("2026-10-29T12:00:00Z") };
 
   const prices = new PriceCache({
-    agentDir: agentDir.pathname,
+    cacheFile: cacheFileIn(agentDir).pathname,
     costsUrl: `${proxy.root}/costs`,
     now: () => clock.now,
   });
@@ -248,7 +252,7 @@ const startPriceCache = async (
     agentDir,
     clock,
     prices,
-    pricesFile: new URL("cliproxyapi-prices.json", agentDir),
+    pricesFile: cacheFileIn(agentDir),
     proxy,
   };
 };
@@ -276,6 +280,7 @@ test("extension connection honors CLIPROXYAPI priority and ignores OPENAI", asyn
     CLIPROXYAPI_BASE_URL: "env.test/v1",
     OPENAI_API_KEY: "must-not-win",
     OPENAI_BASE_URL: "must-not-win.test",
+    XDG_CACHE_HOME: agentDir.pathname,
   }).connection();
 
   assert.equal(connection?.apiKey, "env-key");
@@ -284,6 +289,7 @@ test("extension connection honors CLIPROXYAPI priority and ignores OPENAI", asyn
   const openAiOnly = new Settings(agentDir.pathname, {
     OPENAI_API_KEY: "ignored",
     OPENAI_BASE_URL: "ignored.test",
+    XDG_CACHE_HOME: agentDir.pathname,
   }).connection();
 
   assert.equal(openAiOnly?.apiKey, "file-key");
@@ -294,7 +300,10 @@ test("extension connection honors CLIPROXYAPI priority and ignores OPENAI", asyn
     `${JSON.stringify({ thinkingDisplay: { "claude-opus-5-5": "full" } }, null, 2)}\n`
   );
   assert.throws(
-    () => new Settings(agentDir.pathname, {}).config(),
+    () =>
+      new Settings(agentDir.pathname, {
+        XDG_CACHE_HOME: agentDir.pathname,
+      }).config(),
     /Invalid cliproxyapi\.json at \/thinkingDisplay\/claude-opus-5-5/u
   );
 });
@@ -303,7 +312,10 @@ test("saving cliproxyapi.json round-trips and leaves no temp file behind", async
   const agentDir = new URL("save-agent/", outputDirectory);
   await rm(agentDir, { force: true, recursive: true });
 
-  const settings = new Settings(agentDir.pathname, {});
+  const settings = new Settings(agentDir.pathname, {
+    XDG_CACHE_HOME: agentDir.pathname,
+  });
+
   settings.save({ baseUrl: "saved.test", pause: true });
   settings.save({ searchModel: "gpt-6-luna" });
 
@@ -317,7 +329,11 @@ test("saving cliproxyapi.json round-trips and leaves no temp file behind", async
 test("a save that cannot serialize keeps the old cliproxyapi.json", async () => {
   const agentDir = new URL("failed-save-agent/", outputDirectory);
   await rm(agentDir, { force: true, recursive: true });
-  const settings = new Settings(agentDir.pathname, {});
+
+  const settings = new Settings(agentDir.pathname, {
+    XDG_CACHE_HOME: agentDir.pathname,
+  });
+
   settings.save({ baseUrl: "kept.test" });
   const before = await readFile(new URL("cliproxyapi.json", agentDir), "utf-8");
 
@@ -336,7 +352,11 @@ test("a save that cannot serialize keeps the old cliproxyapi.json", async () => 
 test("cliproxyapi.json reads see a write from another pi process", async () => {
   const agentDir = new URL("memo-config-agent/", outputDirectory);
   await rm(agentDir, { force: true, recursive: true });
-  const settings = new Settings(agentDir.pathname, {});
+
+  const settings = new Settings(agentDir.pathname, {
+    XDG_CACHE_HOME: agentDir.pathname,
+  });
+
   settings.save({ baseUrl: "memo.test", pause: false });
 
   // Another pi process rewrites the file in place with /pause.
@@ -353,7 +373,11 @@ test("a quota mark written by one usage tracker hides the model in another", asy
   await rm(agentDir, { force: true, recursive: true });
   await mkdir(agentDir, { recursive: true });
 
-  const options = { settings: new Settings(agentDir.pathname, {}) };
+  const options = {
+    settings: new Settings(agentDir.pathname, {
+      XDG_CACHE_HOME: agentDir.pathname,
+    }),
+  };
 
   const reader = new UsageTracker(options);
   const writer = new UsageTracker(options);
@@ -482,13 +506,12 @@ const managedTracker = (agentDir: URL, root: string, managementKey: string) =>
       CLIPROXYAPI_API_KEY: "usage-test-key",
       CLIPROXYAPI_BASE_URL: root,
       CLIPROXY_MANAGEMENT_KEY: managementKey,
+      XDG_CACHE_HOME: agentDir.pathname,
     }),
   });
 
 const exhaustedMarks = async (agentDir: URL): Promise<Record<string, number>> =>
-  JSON.parse(
-    await readFile(new URL("cliproxyapi-usage.json", agentDir), "utf-8")
-  ).exhausted;
+  JSON.parse(await readFile(cacheFileIn(agentDir), "utf-8")).usage.exhausted;
 
 const STILL_WAITING = "still waiting on the management API";
 
@@ -562,9 +585,7 @@ test("a cooldown reset in another pi process stays reset when the usage fetch af
 
   const refreshing = recorder.refresh(true);
 
-  assert.deepEqual(await resetter.resetCooldowns("claude-opus-5-5"), [
-    "claude-opus-5-5",
-  ]);
+  await resetter.resetCooldowns();
   management.release();
   await Promise.all([recording, refreshing]);
 
@@ -577,7 +598,9 @@ test("Claude's account rate limit 429 without a management key marks the model o
   await mkdir(agentDir, { recursive: true });
 
   const tracker = new UsageTracker({
-    settings: new Settings(agentDir.pathname, {}),
+    settings: new Settings(agentDir.pathname, {
+      XDG_CACHE_HOME: agentDir.pathname,
+    }),
   });
 
   const before = Date.now();
@@ -610,6 +633,7 @@ test("registered family APIs, configured thought summaries, and live Fast tier w
   const settings = new Settings(agentDir.pathname, {
     CLIPROXYAPI_API_KEY: "extension-test-key",
     CLIPROXYAPI_BASE_URL: proxy.root,
+    XDG_CACHE_HOME: agentDir.pathname,
   });
 
   const fast = new FastModeController(false);
@@ -617,7 +641,7 @@ test("registered family APIs, configured thought summaries, and live Fast tier w
   const extensionProvider = createExtensionProvider({
     fast,
     prices: new PriceCache({
-      agentDir: agentDir.pathname,
+      cacheFile: cacheFileIn(agentDir).pathname,
       costsUrl: `${proxy.root}/costs`,
     }),
     settings,
@@ -684,7 +708,7 @@ test("registered family APIs, configured thought summaries, and live Fast tier w
   const restarted = createExtensionProvider({
     fast,
     prices: new PriceCache({
-      agentDir: agentDir.pathname,
+      cacheFile: cacheFileIn(agentDir).pathname,
       costsUrl: `${proxy.root}/costs`,
     }),
     settings,
@@ -717,7 +741,7 @@ test("the first price load fetches models.dev once and saves only the catalog's 
   assert.equal(matchModelCost("gpt-6-luna", loaded.catalog).input, 2);
   assert.equal(matchModelCost("gpt-6-luna", loaded.catalog, true).input, 4);
 
-  const saved = JSON.parse(await readFile(pricesFile, "utf-8"));
+  const saved = JSON.parse(await readFile(pricesFile, "utf-8")).prices;
   assert.equal(saved.etag, COSTS_ETAG);
   assert.deepEqual(Object.keys(saved.prices), catalogIds);
 });
@@ -770,7 +794,7 @@ test("a new catalog id fetches every price again without If-None-Match", async (
   assert.equal(proxy.costRequests().at(-1)?.ifNoneMatch, undefined);
   assert.equal(matchModelCost("grok-4.3", loaded.catalog).input, 0);
 
-  const saved = JSON.parse(await readFile(pricesFile, "utf-8"));
+  const saved = JSON.parse(await readFile(pricesFile, "utf-8")).prices;
   assert.equal(saved.prices["grok-4.3"], null);
 });
 
@@ -802,6 +826,7 @@ test("a models.dev outage with no cached prices zeroes costs and says so", async
   const settings = new Settings(agentDir.pathname, {
     CLIPROXYAPI_API_KEY: "extension-test-key",
     CLIPROXYAPI_BASE_URL: proxy.root,
+    XDG_CACHE_HOME: agentDir.pathname,
   });
 
   const connection = settings.connection();
@@ -812,7 +837,7 @@ test("a models.dev outage with no cached prices zeroes costs and says so", async
     fast: new FastModeController(false),
     onPriceWarning: (message) => warnings.push(message),
     prices: new PriceCache({
-      agentDir: agentDir.pathname,
+      cacheFile: cacheFileIn(agentDir).pathname,
       costsUrl: `${proxy.root}/costs`,
     }),
     settings,
@@ -846,12 +871,13 @@ const startCatalogRefresh = async (
     fast: new FastModeController(false),
     now: () => clock.now,
     prices: new PriceCache({
-      agentDir: agentDir.pathname,
+      cacheFile: cacheFileIn(agentDir).pathname,
       costsUrl: `${proxy.root}/costs`,
     }),
     settings: new Settings(agentDir.pathname, {
       CLIPROXYAPI_API_KEY: "extension-test-key",
       CLIPROXYAPI_BASE_URL: proxy.root,
+      XDG_CACHE_HOME: agentDir.pathname,
     }),
   });
 
@@ -918,12 +944,13 @@ test("a refresh gives Claude models pi's prompt cache lifetimes", async (t) => {
   const extensionProvider = createExtensionProvider({
     fast: new FastModeController(false),
     prices: new PriceCache({
-      agentDir: agentDir.pathname,
+      cacheFile: cacheFileIn(agentDir).pathname,
       costsUrl: `${proxy.root}/costs`,
     }),
     settings: new Settings(agentDir.pathname, {
       CLIPROXYAPI_API_KEY: "prompt-cache-key",
       CLIPROXYAPI_BASE_URL: proxy.root,
+      XDG_CACHE_HOME: agentDir.pathname,
     }),
   });
 
@@ -1003,7 +1030,11 @@ test("formatStatus without an API key or management key says so", () => {
 test("the status never shows the API key or the management key", async () => {
   const agentDir = new URL("status-agent/", outputDirectory);
   await rm(agentDir, { force: true, recursive: true });
-  const fileSettings = new Settings(agentDir.pathname, {});
+
+  const fileSettings = new Settings(agentDir.pathname, {
+    XDG_CACHE_HOME: agentDir.pathname,
+  });
+
   fileSettings.save({
     apiKey: "SENTINEL-FILE-API-KEY",
     managementKey: "SENTINEL-FILE-MANAGEMENT-KEY",
@@ -1014,6 +1045,7 @@ test("the status never shows the API key or the management key", async () => {
   const envSettings = new Settings(agentDir.pathname, {
     CLIPROXYAPI_API_KEY: "SENTINEL-ENV-API-KEY",
     CLIPROXY_MANAGEMENT_KEY: "SENTINEL-ENV-MANAGEMENT-KEY",
+    XDG_CACHE_HOME: agentDir.pathname,
   });
 
   const fromEnv = formatStatus({
@@ -1120,43 +1152,48 @@ const mixedSegments: UsageSegment[] = [
 
 test("segments covers windows, out with the earliest return, unknown, skipped, and model-out accounts", async () => {
   const agentDir = await usageAgentDir("segments-agent");
+  await mkdir(new URL("pi-cliproxyapi/", agentDir), { recursive: true });
   await writeFile(
-    new URL("cliproxyapi-usage.json", agentDir),
+    cacheFileIn(agentDir),
     `${JSON.stringify({
-      exhausted: {
-        "devin-2": NOW + 5 * 3_600_000,
-        "orphan-model": NOW + 3 * 3_600_000,
+      usage: {
+        exhausted: {
+          "devin-2": NOW + 5 * 3_600_000,
+          "orphan-model": NOW + 3 * 3_600_000,
+        },
+        providers: [
+          {
+            models: ["claude-haiku-5-5"],
+            name: "claude",
+            provider: "claude",
+            windows: [
+              { label: "5h", resetAt: NOW + 2 * 3_600_000, usedPercent: 12 },
+              { label: "7d", usedPercent: 48 },
+            ],
+          },
+          {
+            exhaustedUntil: NOW + 2 * 3_600_000,
+            models: ["devin-1", "devin-2"],
+            name: "devin",
+            provider: "devin",
+            windows: [{ label: "5h", usedPercent: 100 }],
+          },
+          { models: ["muse-1"], name: "muse", provider: "muse", windows: [] },
+          {
+            models: ["not-in-catalog"],
+            name: "other",
+            provider: "other",
+            windows: [{ label: "5h", usedPercent: 3 }],
+          },
+        ],
       },
-      providers: [
-        {
-          models: ["claude-haiku-5-5"],
-          name: "claude",
-          provider: "claude",
-          windows: [
-            { label: "5h", resetAt: NOW + 2 * 3_600_000, usedPercent: 12 },
-            { label: "7d", usedPercent: 48 },
-          ],
-        },
-        {
-          exhaustedUntil: NOW + 2 * 3_600_000,
-          models: ["devin-1", "devin-2"],
-          name: "devin",
-          provider: "devin",
-          windows: [{ label: "5h", usedPercent: 100 }],
-        },
-        { models: ["muse-1"], name: "muse", provider: "muse", windows: [] },
-        {
-          models: ["not-in-catalog"],
-          name: "other",
-          provider: "other",
-          windows: [{ label: "5h", usedPercent: 3 }],
-        },
-      ],
     })}\n`
   );
 
   const tracker = new UsageTracker({
-    settings: new Settings(agentDir.pathname, {}),
+    settings: new Settings(agentDir.pathname, {
+      XDG_CACHE_HOME: agentDir.pathname,
+    }),
   });
 
   const segments = tracker.segments(

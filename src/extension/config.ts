@@ -20,15 +20,10 @@ import type {
   ConnectionValues,
   ResolvedConnection,
 } from "../core/connection.ts";
-import {
-  memoByFile,
-  readJsonFile,
-  readJsonMemo,
-  writeJsonAtomic,
-} from "./files.ts";
+import { CacheSection, cacheFilePath } from "./cache.ts";
+import { memoByFile, readJsonMemo, writeJsonAtomic } from "./files.ts";
 
 const CONFIG_FILE_NAME = "cliproxyapi.json";
-const MODELS_CACHE_FILE_NAME = "cliproxyapi-provider-models.json";
 const DEFAULT_PROVIDER_NAME = "CLIProxyAPI";
 
 /** pi keeps the /login key as an OAuth credential so it can carry the base URL, so it must never expire. */
@@ -189,12 +184,15 @@ export const loginCredentials = (
  */
 export class Settings {
   readonly agentDir: string;
+  /** Holds every cache, so pi's agent dir keeps only cliproxyapi.json. */
+  readonly cacheFile: string;
   readonly providerId: string;
   readonly providerName: string;
   private readonly env: Env;
 
   constructor(agentDir: string, env: Env = process.env) {
     this.agentDir = agentDir;
+    this.cacheFile = cacheFilePath(env);
     this.env = env;
     const config = this.config();
     this.providerId =
@@ -370,21 +368,17 @@ export class Settings {
     );
   }
 
-  modelsCache(baseUrl: string): ModelsCache | undefined {
-    try {
-      const value = readJsonFile(
-        this.file(MODELS_CACHE_FILE_NAME),
-        ModelsCacheFileSchema
-      );
+  private modelsSection(): CacheSection<typeof ModelsCacheFileSchema> {
+    return new CacheSection(this.cacheFile, "models", ModelsCacheFileSchema);
+  }
 
-      return value?.baseUrl === baseUrl ? value : undefined;
-    } catch {
-      // A cache from an older version, or a damaged one, is fetched again.
-      return undefined;
-    }
+  modelsCache(baseUrl: string): ModelsCache | undefined {
+    const value = this.modelsSection().read();
+
+    return value?.baseUrl === baseUrl ? value : undefined;
   }
 
   saveModelsCache(cache: ModelsCache): void {
-    writeJsonAtomic(this.file(MODELS_CACHE_FILE_NAME), cache);
+    this.modelsSection().write(cache);
   }
 }
