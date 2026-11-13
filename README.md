@@ -22,7 +22,7 @@ The extension sends each model through the API that suits it. Claude and Kimi mo
 Install the package from GitHub with pi:
 
 ```sh
-pi install git:github.com/Snestra/pi-cliproxyapi-provider
+pi install git:github.com/bjoernaagaard/pi-cliproxyapi-provider
 ```
 
 Pi follows the `main` branch and updates the package on `pi update`. The package is not on npm.

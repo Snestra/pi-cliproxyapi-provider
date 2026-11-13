@@ -9,15 +9,15 @@
     "pi-package",
     "provider"
   ],
-  "homepage": "https://github.com/Snestra/pi-cliproxyapi-provider#readme",
+  "homepage": "https://github.com/bjoernaagaard/pi-cliproxyapi-provider#readme",
   "bugs": {
-    "url": "https://github.com/Snestra/pi-cliproxyapi-provider/issues"
+    "url": "https://github.com/bjoernaagaard/pi-cliproxyapi-provider/issues"
   },
   "license": "MIT",
   "author": "Bjørn Aagaard",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Snestra/pi-cliproxyapi-provider.git"
+    "url": "git+https://github.com/bjoernaagaard/pi-cliproxyapi-provider.git"
   },
   "type": "module",
   "scripts": {
