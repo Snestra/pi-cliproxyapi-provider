@@ -1,5 +1,3 @@
-import path from "node:path";
-
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -17,15 +15,12 @@ import {
   unavailableModels,
 } from "../core/usage.ts";
 import type { ProviderUsage } from "../core/usage.ts";
+import { CacheSection } from "./cache.ts";
 import type { ManagementKeySource, Settings } from "./config.ts";
 import { errorText } from "./error-text.ts";
-import { readJsonMemo, writeJsonAtomic } from "./files.ts";
 import type { UsageSegment } from "./footer-render.ts";
 import { formatStatusLine, outUntil } from "./footer-render.ts";
 import { USAGE_STATUS_KEY } from "./status-keys.ts";
-
-/** Shared by every pi process, so a quota error in one agent hides the model in all of them. */
-const USAGE_FILE_NAME = "cliproxyapi-usage.json";
 
 /** How old the shared usage snapshot may get before a session fetches a new one. */
 const USAGE_TTL_MS = 2 * 60_000;
@@ -37,6 +32,10 @@ const UsageFileSchema = Type.Object({
   fetchedAt: Type.Optional(Type.Number()),
   providers: Type.Array(ProviderUsageSchema),
   resets: Type.Optional(Type.Record(Type.String(), Type.Number())),
+  /** After a failed fetch, no session fetches from this base URL before this time. */
+  retry: Type.Optional(
+    Type.Object({ at: Type.Number(), baseUrl: Type.String() })
+  ),
 });
 
 type UsageFile = Static<typeof UsageFileSchema>;
@@ -54,8 +53,9 @@ export interface UsageTrackerOptions {
   settings: Settings;
 }
 
+/** Shared by every pi process through the cache file, so a quota error in one agent hides the model in all of them. */
 export class UsageTracker {
-  private readonly filePath: string;
+  private readonly section: CacheSection<typeof UsageFileSchema>;
   private readonly settings: Settings;
   /** Quota marks this tracker guessed, by model id, until a usage fetch names the real reset. */
   private readonly guessedMarks = new Map<
@@ -65,20 +65,20 @@ export class UsageTracker {
 
   constructor(options: UsageTrackerOptions) {
     this.settings = options.settings;
-    this.filePath = path.join(options.settings.agentDir, USAGE_FILE_NAME);
+    this.section = new CacheSection(
+      options.settings.cacheFile,
+      "usage",
+      UsageFileSchema
+    );
   }
 
   /**
-   * A missing or broken file counts as empty: it only holds a cache. The
+   * A missing or broken section counts as empty: it only holds a cache. The
    * result is shared through the file memo, so callers build new objects
    * instead of changing it.
    */
   private read(): UsageFile {
-    try {
-      return readJsonMemo(this.filePath, UsageFileSchema) ?? EMPTY;
-    } catch {
-      return EMPTY;
-    }
+    return this.section.read() ?? EMPTY;
   }
 
   private write(update: (current: UsageFile) => UsageFile): void {
@@ -89,7 +89,7 @@ export class UsageTracker {
       Object.entries(next.exhausted).filter(([, until]) => until > now)
     );
 
-    writeJsonAtomic(this.filePath, { ...next, exhausted });
+    this.section.write({ ...next, exhausted });
   }
 
   /** The snapshot's accounts and fetch time count only for the base URL they were fetched from. */
@@ -241,27 +241,22 @@ export class UsageTracker {
     return marked;
   }
 
-  async resetCooldowns(modelId?: string): Promise<string[]> {
-    const affected = await resetServerCooldowns({
-      ...this.settings.requireManagementAccess(),
-      modelId,
-    });
+  /** Clears every server cooldown and every local quota mark. */
+  async resetCooldowns(): Promise<void> {
+    const affected = await resetServerCooldowns(
+      this.settings.requireManagementAccess()
+    );
 
-    // A server reset clears the whole credential, so its other models come
-    // back too: recordError hid them locally alongside this one. The server
-    // keeps its quota observations across a reset, so the reset time lets
-    // hiddenFrom ignore the older ones.
+    // The server keeps its quota observations across a reset, so the reset
+    // time lets hiddenFrom ignore the older ones.
     const resetAt = Date.now();
-    const resetIds = modelId === undefined ? affected : [modelId, ...affected];
 
-    this.clearMarks(modelId === undefined ? undefined : resetIds, (file) => ({
+    this.clearMarks(undefined, (file) => ({
       resets: {
         ...file.resets,
-        ...Object.fromEntries(resetIds.map((id) => [id, resetAt])),
+        ...Object.fromEntries(affected.map((id) => [id, resetAt])),
       },
     }));
-
-    return affected;
   }
 
   /** A reply proves the model works again. True when that cleared a quota mark. */
@@ -282,19 +277,31 @@ export class UsageTracker {
 
     if (
       !force &&
-      current.baseUrl === access.baseUrl &&
-      current.fetchedAt !== undefined &&
-      Date.now() - current.fetchedAt < USAGE_TTL_MS
+      (Date.now() < this.retryAt(current) ||
+        (current.baseUrl === access.baseUrl &&
+          current.fetchedAt !== undefined &&
+          Date.now() - current.fetchedAt < USAGE_TTL_MS))
     ) {
       return;
     }
 
     const startedAt = Date.now();
+    let providers: ProviderUsage[];
 
-    const providers = await fetchUsage({
-      ...access,
-      signal,
-    });
+    try {
+      providers = await fetchUsage({ ...access, signal });
+    } catch (error) {
+      if (!signal?.aborted) {
+        const at = Date.now() + USAGE_TTL_MS;
+
+        this.write((file) => ({
+          ...file,
+          retry: { at, baseUrl: access.baseUrl },
+        }));
+      }
+
+      throw error;
+    }
 
     this.write((file) => {
       const fetchedAt = Date.now();
@@ -304,6 +311,7 @@ export class UsageTracker {
         baseUrl: access.baseUrl,
         fetchedAt,
         providers,
+        retry: undefined,
       };
 
       const resets = this.accountResets(next, fetchedAt);
@@ -328,12 +336,22 @@ export class UsageTracker {
     });
   }
 
+  /** When a failed fetch lets the next fetch from the current base URL run. */
+  private retryAt(file: UsageFile): number {
+    const { retry } = file;
+
+    return retry && retry.baseUrl === this.settings.connection()?.baseUrl
+      ? retry.at
+      : 0;
+  }
+
   nextChangeAt(now = Date.now()): number {
     const returns = [...this.hidden(now).values()];
-    const fetchedAt = this.read().fetchedAt ?? now;
+    const file = this.read();
+    const fetchedAt = file.fetchedAt ?? now;
 
     const stale = this.settings.managementAccess()
-      ? fetchedAt + USAGE_TTL_MS
+      ? Math.max(fetchedAt + USAGE_TTL_MS, this.retryAt(file))
       : Infinity;
 
     return Math.max(now + 1000, Math.min(stale, ...returns));
@@ -569,7 +587,7 @@ export const registerUsage = (
     if (managed && "error" in managed) {
       warn(
         ctx,
-        `CLIProxyAPI management key from cliproxyapi.json is unavailable: ${managed.error}. The usage footer, /cliproxyapi-login, and /cliproxyapi-reset need it.`
+        `CLIProxyAPI management key from cliproxyapi.json is unavailable: ${managed.error}. The usage footer and the cooldown reset in /cliproxyapi-status need it.`
       );
     }
 

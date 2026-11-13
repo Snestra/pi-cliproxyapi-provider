@@ -45,15 +45,12 @@ The extension looks for each value in the environment first, then in `~/.pi/agen
 | Command | What it does |
 | --- | --- |
 | `/login cliproxyapi` | Saves the server address and API key |
-| `/cliproxyapi-status` | Shows the connection, model count, prices, and settings |
-| `/cliproxyapi-refresh` | Reloads server model definitions when a management key is set, then loads the model list again |
-| `/cliproxyapi-login <provider> [account]` | Adds an upstream account or signs in again to an existing account by label, file name, or auth index |
-| `/cliproxyapi-reset [model-id]` | Clears CLIProxyAPI cooldowns for every account, or only for the accounts that serve one model |
+| `/cliproxyapi-status` | Reloads the model list, clears every CLIProxyAPI cooldown when a management key is set, then shows the connection, model count, prices, and settings |
 | `/fast` | Turns Fast mode on or off for models that support it |
 | `/pause` and `/continue` | Holds provider requests until you continue |
 | `/websearch-model [model-id\|auto]` | Picks the model that `web_search` uses |
 
-The extension caches the model list for 10 minutes. It hides models that the server no longer lists, and models whose accounts have hit their usage limits.
+The extension caches the model list for 10 minutes. It keeps the model list, prices, and usage in one file, `~/.cache/pi-cliproxyapi/cache.json` (or under `$XDG_CACHE_HOME`), so `~/.pi/agent` holds only `cliproxyapi.json`. It hides models that the server no longer lists, and models whose accounts have hit their usage limits.
 
 ## Settings file
 
@@ -78,7 +75,7 @@ You can put settings in `~/.pi/agent/cliproxyapi.json`. Every field is optional:
 
 The fields work as follows:
 
-- `managementKey` is the CLIProxyAPI management key. It turns on the usage footer, `/cliproxyapi-login`, `/cliproxyapi-reset`, and server model definition reloads in `/cliproxyapi-refresh`. You can also set it with the `CLIPROXY_MANAGEMENT_KEY` environment variable. A value that starts with `!` is a shell command, and its output is the key, as with keys in pi's `auth.json`.
+- `managementKey` is the CLIProxyAPI management key. It turns on the usage footer, and lets `/cliproxyapi-status` reload the server's model definitions and clear cooldowns. You can also set it with the `CLIPROXY_MANAGEMENT_KEY` environment variable. A value that starts with `!` is a shell command, and its output is the key, as with keys in pi's `auth.json`.
 - `footer` turns the custom footer on or off. It defaults to true. Set it to false to restore pi's stock footer, with each account's quota left shown on one plain line with status emoji instead.
 - `thinkingDisplay` sets, per model, whether the model sends thought summaries. It applies to models that use the Anthropic Messages API with thinking turned on. The default is `omitted`, because Claude streams its answer only when summaries are off. Set a model to `summarized` to see its summaries.
 - `maxTokens` sets, per model, the most output tokens pi asks for. Use it for models that CLIProxyAPI lists without an output limit, such as API-key upstreams. Those models otherwise get 16,384. pi still trims each request to the context that is left.

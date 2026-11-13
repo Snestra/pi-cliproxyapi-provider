@@ -6,13 +6,12 @@ import type {
 
 import { withoutStale } from "../core/catalog.ts";
 import type { CliproxyModel } from "../core/catalog.ts";
-import { refreshServerCatalog } from "../core/oauth.ts";
-import { completeFrom } from "./completions.ts";
+import { refreshServerCatalog } from "../core/management.ts";
+import { removeOldCacheFiles } from "./cache.ts";
 import { Settings } from "./config.ts";
 import { errorText } from "./error-text.ts";
 import { FastModeController } from "./fast.ts";
 import { FooterController } from "./footer.ts";
-import { registerOAuthLogin } from "./oauth.ts";
 import { PauseController, registerPause } from "./pause.ts";
 import { PriceCache } from "./prices.ts";
 import { createExtensionProvider } from "./provider.ts";
@@ -27,12 +26,13 @@ export default async function cliproxyapiProvider(
   pi: ExtensionAPI
 ): Promise<void> {
   const settings = new Settings(getAgentDir());
+  removeOldCacheFiles(settings.agentDir);
   const { providerId } = settings;
   const config = settings.config();
   const fast = new FastModeController(config.fast ?? false);
   const pause = new PauseController(config.pause ?? false);
   const tracker = new UsageTracker({ settings });
-  const prices = new PriceCache({ agentDir: settings.agentDir });
+  const prices = new PriceCache({ cacheFile: settings.cacheFile });
 
   let activeContext: ExtensionContext | undefined;
   let notifiedStaleModel: string | undefined;
@@ -166,59 +166,6 @@ export default async function cliproxyapiProvider(
     await usage.refresh(ctx);
   };
 
-  pi.registerCommand("cliproxyapi-reset", {
-    description:
-      "Reset CLIProxyAPI cooldowns, optionally for one model: /cliproxyapi-reset [model-id].",
-    getArgumentCompletions: (prefix) => completeFrom(catalogIds(), prefix),
-    handler: async (args, ctx) => {
-      const modelId = args.trim();
-
-      if (/\s/u.test(modelId)) {
-        ctx.ui.notify("Usage: /cliproxyapi-reset [model-id]", "error");
-
-        return;
-      }
-
-      let affected: string[];
-
-      try {
-        affected = await tracker.resetCooldowns(modelId || undefined);
-      } catch (error) {
-        ctx.ui.notify(
-          `Failed to reset CLIProxyAPI cooldowns: ${errorText(error)}`,
-          "error"
-        );
-
-        return;
-      }
-
-      try {
-        await refreshAll(ctx);
-      } catch (error) {
-        ctx.ui.notify(
-          `CLIProxyAPI cooldowns were reset, but refreshing models failed: ${errorText(error)}`,
-          "warning"
-        );
-      }
-
-      if (modelId && affected.length === 0) {
-        ctx.ui.notify(
-          `No CLIProxyAPI credential serves ${modelId}; nothing was reset for it.`,
-          "warning"
-        );
-
-        return;
-      }
-
-      ctx.ui.notify(
-        affected.length > 0
-          ? `Reset CLIProxyAPI cooldowns for: ${affected.join(", ")}.`
-          : "Reset CLIProxyAPI cooldowns for all credentials.",
-        "info"
-      );
-    },
-  });
-
   pi.registerCommand("fast", {
     description: "Toggle CLIProxyAPI Fast mode globally.",
     handler: async (args, ctx) => {
@@ -273,46 +220,43 @@ export default async function cliproxyapiProvider(
     },
   });
 
-  pi.registerCommand("cliproxyapi-refresh", {
-    description: "Force refresh CLIProxyAPI models from the remote catalog.",
-    handler: async (args, ctx) => {
-      if (args.trim()) {
-        ctx.ui.notify("Usage: /cliproxyapi-refresh", "error");
+  /**
+   * What /cliproxyapi-status does before it shows the status: the server
+   * reloads its model definitions, every cooldown clears, and the model list
+   * and usage load again. Returns one line per step that failed.
+   */
+  const refreshForStatus = async (ctx: ExtensionContext): Promise<string[]> => {
+    const problems: string[] = [];
+    const access = settings.managementAccess();
 
-        return;
-      }
-
-      const access = settings.managementAccess();
-
-      if (access) {
-        try {
-          await refreshServerCatalog({ ...access, signal: ctx.signal });
-        } catch (error) {
-          ctx.ui.notify(
-            `CLIProxyAPI could not reload its model definitions: ${errorText(error)}`,
-            "warning"
-          );
-        }
+    if (access) {
+      try {
+        await refreshServerCatalog({ ...access, signal: ctx.signal });
+      } catch (error) {
+        problems.push(
+          `CLIProxyAPI could not reload its model definitions: ${errorText(error)}`
+        );
       }
 
       try {
-        await refreshAll(ctx);
-        const models = controller.getModels();
-        const stale = models.filter((model) => model.stale).length;
-        ctx.ui.notify(
-          `Refreshed ${models.length - stale} CLIProxyAPI models${stale ? `. Hid ${stale} that CLIProxyAPI no longer lists` : ""}.`,
-          "info"
-        );
+        await tracker.resetCooldowns();
       } catch (error) {
-        ctx.ui.notify(
-          `Failed to refresh CLIProxyAPI models: ${errorText(error)}`,
-          "error"
+        problems.push(
+          `Failed to reset CLIProxyAPI cooldowns: ${errorText(error)}`
         );
       }
-    },
-  });
+    }
 
-  registerOAuthLogin(pi, { refresh: refreshAll, settings });
+    try {
+      await refreshAll(ctx);
+    } catch (error) {
+      problems.push(
+        `Failed to refresh CLIProxyAPI models: ${errorText(error)}`
+      );
+    }
+
+    return problems;
+  };
 
   const availableModels = (): CliproxyModel[] =>
     available(controller.getModels());
@@ -373,7 +317,7 @@ export default async function cliproxyapiProvider(
     };
   };
 
-  registerStatus(pi, gatherStatus);
+  registerStatus(pi, { gather: gatherStatus, refresh: refreshForStatus });
 
   pi.on("session_start", async (_event, ctx) => {
     activeContext = ctx;

@@ -1,4 +1,7 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
 
 import type { ThoughtSummary } from "../core/catalog.ts";
 import type { ValueSource } from "../core/connection.ts";
@@ -142,30 +145,39 @@ export const formatStatus = (snapshot: StatusSnapshot): string =>
     `Thinking     ${formatThinking(snapshot.thinking)}`,
   ].join("\n");
 
+export interface StatusSources {
+  gather: () => StatusSnapshot;
+  /** Brings the server and the model list up to date. Returns one line per step that failed. */
+  refresh: (ctx: ExtensionContext) => Promise<string[]>;
+}
+
 export const registerStatus = (
   pi: ExtensionAPI,
-  gather: () => StatusSnapshot
+  { gather, refresh }: StatusSources
 ): void => {
   pi.registerCommand("cliproxyapi-status", {
     description:
-      "Show the CLIProxyAPI connection, models, prices, Fast, pause, usage, web search model, and thought summaries.",
-    handler: (args, ctx) => {
+      "Reload CLIProxyAPI models, clear cooldowns, and show the connection, models, prices, Fast, pause, usage, web search model, and thought summaries.",
+    handler: async (args, ctx) => {
       if (args.trim()) {
         ctx.ui.notify("Usage: /cliproxyapi-status", "error");
 
-        return Promise.resolve();
+        return;
       }
 
+      const problems = await refresh(ctx);
+
       try {
-        ctx.ui.notify(formatStatus(gather()), "info");
+        ctx.ui.notify(
+          [formatStatus(gather()), ...problems].join("\n"),
+          problems.length > 0 ? "warning" : "info"
+        );
       } catch (error) {
         ctx.ui.notify(
           `Failed to read CLIProxyAPI status: ${errorText(error)}`,
           "error"
         );
       }
-
-      return Promise.resolve();
     },
   });
 };

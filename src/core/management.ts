@@ -93,3 +93,27 @@ export const managementRequest = async <Schema extends TSchema>(
 
   return value;
 };
+
+const RefreshSchema = Type.Object({
+  changed_providers: Type.Optional(Type.Array(Type.String())),
+  ok: Type.Boolean(),
+});
+
+/** Asks CLIProxyAPI to reload its model definitions. False when the server has no such route. */
+export const refreshServerCatalog = async (
+  options: ManagementRequestOptions
+): Promise<boolean> => {
+  try {
+    await managementRequest(options, "/models/refresh", RefreshSchema, {
+      method: "POST",
+    });
+
+    return true;
+  } catch (error) {
+    if (error instanceof ManagementHttpError && error.status === 404) {
+      return false;
+    }
+
+    throw error;
+  }
+};

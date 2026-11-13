@@ -131,7 +131,7 @@ export const registerWebSearch = (
 
       if (!model) {
         throw new Error(
-          "No CLIProxyAPI search model is available. Run /cliproxyapi-refresh."
+          "No CLIProxyAPI search model is available. Run /cliproxyapi-status."
         );
       }
 
